@@ -18,6 +18,58 @@ const runBtn = document.getElementById("runBtn");
 const logEl = document.getElementById("log");
 const confirmArea = document.getElementById("confirmArea");
 const confirmTitle = document.getElementById("confirmTitle");
+const videoPathInput = document.getElementById("videoPathInput");
+const browseModalEl = document.getElementById("browseModal");
+const browseModal = new bootstrap.Modal(browseModalEl);
+const browsePath = document.getElementById("browsePath");
+const browseList = document.getElementById("browseList");
+
+function loadBrowse(path) {
+  const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
+  fetch(url)
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        browsePath.textContent = `Error: ${data.error}`;
+        browseList.innerHTML = "";
+        return;
+      }
+      browsePath.textContent = data.path;
+      browseList.innerHTML = "";
+      if (data.parent) {
+        const up = document.createElement("a");
+        up.href = "#";
+        up.className = "list-group-item list-group-item-action";
+        up.textContent = ".. (up)";
+        up.onclick = (e) => {
+          e.preventDefault();
+          loadBrowse(data.parent);
+        };
+        browseList.appendChild(up);
+      }
+      data.entries.forEach((entry) => {
+        const item = document.createElement("a");
+        item.href = "#";
+        item.className = "list-group-item list-group-item-action";
+        item.textContent = (entry.is_dir ? "📁 " : "🎬 ") + entry.name;
+        item.onclick = (e) => {
+          e.preventDefault();
+          if (entry.is_dir) {
+            loadBrowse(entry.path);
+          } else {
+            videoPathInput.value = entry.path;
+            browseModal.hide();
+          }
+        };
+        browseList.appendChild(item);
+      });
+    });
+}
+
+document.getElementById("browseBtn").addEventListener("click", () => {
+  loadBrowse(videoPathInput.value || null);
+  browseModal.show();
+});
 const confirmBody = document.getElementById("confirmBody");
 const confirmButtons = document.getElementById("confirmButtons");
 
