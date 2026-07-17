@@ -1,6 +1,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 # repo root (parent of this pipeline/ package) - whisper.cpp/ lives alongside subtranslate.py
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -57,15 +58,29 @@ def check_dependencies(model: str, use_vad: bool, vad_engine: str) -> tuple[Path
     return model_path, vad_model_path
 
 
-def extract_audio(video_path: Path, workdir: Path) -> Path:
+def _run_streamed(cmd: list[str], log_fn: Callable[[str], None]) -> None:
+    """Run cmd, forwarding its stdout/stderr line-by-line to log_fn as it runs (instead of
+    subprocess.run's default of just inheriting the parent's stdio) - needed so a caller
+    like the web UI can capture live progress instead of it going straight to a terminal
+    the caller doesn't own. Raises subprocess.CalledProcessError on nonzero exit, matching
+    subprocess.run(..., check=True)."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        log_fn(line.rstrip("\n"))
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+
+def extract_audio(video_path: Path, workdir: Path, log_fn: Callable[[str], None] = print) -> Path:
     wav_path = workdir / f"{video_path.stem}.wav"
-    print(f"[1/4] Extracting audio -> {wav_path}")
-    subprocess.run(
+    log_fn(f"[1/4] Extracting audio -> {wav_path}")
+    _run_streamed(
         [
             "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path),
         ],
-        check=True,
+        log_fn,
     )
     return wav_path
 
@@ -75,7 +90,7 @@ def transcribe(
     out_stem: Path, threads: int, use_gpu: bool, vad_model_path: Path | None,
     vad_max_speech_s: float, entropy_thold: float, logprob_thold: float, no_speech_thold: float,
     max_context: int, vad_threshold: float, vad_min_speech_ms: int, vad_min_silence_ms: int,
-    vad_speech_pad_ms: int,
+    vad_speech_pad_ms: int, log_fn: Callable[[str], None] = print,
 ) -> Path:
     cmd = [
         str(WHISPER_CLI), "-m", str(model_path), "-f", str(wav_path),
@@ -93,15 +108,15 @@ def transcribe(
             "-vt", str(vad_threshold), "-vspd", str(vad_min_speech_ms),
             "-vsd", str(vad_min_silence_ms), "-vp", str(vad_speech_pad_ms),
         ]
-    subprocess.run(cmd, check=True)
+    _run_streamed(cmd, log_fn)
     return Path(f"{out_stem}.srt")
 
 
 def mux(
     video_path: Path, src_srt: Path, src_lang: str, target_srt: Path | None, target_lang: str,
-    output_path: Path,
+    output_path: Path, log_fn: Callable[[str], None] = print,
 ) -> None:
-    print(f"[mux] Muxing subtitles -> {output_path}")
+    log_fn(f"[mux] Muxing subtitles -> {output_path}")
     src_tag, src_title = language_info(src_lang)
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path), "-i", str(src_srt)]
     if target_srt is not None:
@@ -116,4 +131,4 @@ def mux(
         target_tag, target_title = language_info(target_lang)
         cmd += ["-metadata:s:s:1", f"language={target_tag}", "-metadata:s:s:1", f"title={target_title}"]
     cmd.append(str(output_path))
-    subprocess.run(cmd, check=True)
+    _run_streamed(cmd, log_fn)

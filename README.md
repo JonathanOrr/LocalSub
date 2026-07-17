@@ -84,6 +84,18 @@ Run `python3 subtranslate.py --help` for the full list of flags (whisper decoder
 thresholds, VAD tuning, LLM endpoint/model, chunk sizes, etc.) - most have detailed
 explanations of what they trade off inline in the help text.
 
+## Web UI
+
+```
+python3 webui.py
+```
+
+Starts a local web server at `http://127.0.0.1:5000` with a form covering the same options
+as the CLI flags, a live log of the run, and the repeat/rationality confirm steps rendered
+as an actual checklist instead of typing an exclude-list into a terminal. It's a second,
+independent entry point on top of the same `pipeline/` package - the CLI keeps working
+exactly as documented above either way.
+
 ## Output
 
 Everything for a given video is written into a `<video-stem>/` folder next to it (or

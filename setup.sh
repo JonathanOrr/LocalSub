@@ -43,6 +43,9 @@ else
     echo "==> silero VAD model already present, skipping"
 fi
 
+echo "==> Installing Python dependencies (Flask, for the optional web UI)..."
+pip3 install --user -r "$SCRIPT_DIR/requirements.txt"
+
 echo "==> Installing ten-vad (optional, only needed for --vad-engine ten)..."
 pip3 install --user ten-vad || echo "  [WARNING] pip install ten-vad failed - --vad-engine ten won't work until this is resolved"
 
@@ -70,3 +73,4 @@ echo "start its local server (default: http://localhost:1234/v1) - subtranslate.
 echo "it as an OpenAI-compatible API and does not bundle or install it itself."
 echo ""
 echo "Try it: python3 subtranslate.py your_video.mp4 --lang ja"
+echo "Or the web UI: python3 webui.py"

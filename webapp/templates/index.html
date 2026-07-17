@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>subtranslate</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+  <style>
+    #log { background: #111; color: #ddd; font-family: monospace; font-size: 0.85rem; height: 320px;
+           overflow-y: auto; white-space: pre-wrap; padding: 0.75rem; border-radius: 0.375rem; }
+    #confirmArea { display: none; }
+  </style>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <h1 class="mb-4">subtranslate</h1>
+
+  <form id="runForm" class="row g-3">
+    <div class="col-12">
+      <label class="form-label">Video file path</label>
+      <input type="text" class="form-control" name="video_path" placeholder="/path/to/video.mp4" required>
+    </div>
+
+    <div class="col-md-3">
+      <label class="form-label">Source language</label>
+      <input type="text" class="form-control" name="lang" value="{{ defaults.lang }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Target language</label>
+      <input type="text" class="form-control" name="target_lang" value="{{ defaults.target_lang }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Translation engine</label>
+      <select class="form-select" name="engine">
+        <option value="whisper" {{ 'selected' if defaults.engine == 'whisper' }}>whisper (English only)</option>
+        <option value="llm" {{ 'selected' if defaults.engine == 'llm' }}>llm (any target language)</option>
+      </select>
+    </div>
+    <div class="col-md-3 d-flex align-items-end">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="no_translate" id="no_translate">
+        <label class="form-check-label" for="no_translate">Skip translation</label>
+      </div>
+    </div>
+
+    <div class="accordion" id="advanced">
+
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelBasic">
+            Whisper / decoding
+          </button>
+        </h2>
+        <div id="panelBasic" class="accordion-collapse collapse" data-bs-parent="#advanced">
+          <div class="accordion-body row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Model</label>
+              <input type="text" class="form-control" name="model" value="{{ defaults.model }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">CPU threads (if no GPU)</label>
+              <input type="number" class="form-control" name="threads" value="{{ defaults.threads }}">
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="no_gpu" id="no_gpu">
+                <label class="form-check-label" for="no_gpu">Force CPU decoding</label>
+              </div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Entropy threshold</label>
+              <input type="number" step="0.01" class="form-control" name="entropy_thold" value="{{ defaults.entropy_thold }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Logprob threshold</label>
+              <input type="number" step="0.01" class="form-control" name="logprob_thold" value="{{ defaults.logprob_thold }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">No-speech threshold</label>
+              <input type="number" step="0.01" class="form-control" name="no_speech_thold" value="{{ defaults.no_speech_thold }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Max context tokens</label>
+              <input type="number" class="form-control" name="max_context" value="{{ defaults.max_context }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Repeat-loop flag count</label>
+              <input type="number" class="form-control" name="flag_repeat_count" value="{{ defaults.flag_repeat_count }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Work directory (optional)</label>
+              <input type="text" class="form-control" name="workdir" placeholder="defaults to the video's own directory">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelVad">
+            Voice Activity Detection (VAD)
+          </button>
+        </h2>
+        <div id="panelVad" class="accordion-collapse collapse" data-bs-parent="#advanced">
+          <div class="accordion-body row g-3">
+            <div class="col-md-4 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="vad" id="vad">
+                <label class="form-check-label" for="vad">Enable VAD</label>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">VAD engine</label>
+              <select class="form-select" name="vad_engine">
+                <option value="whisper" {{ 'selected' if defaults.vad_engine == 'whisper' }}>whisper (built-in Silero)</option>
+                <option value="ten" {{ 'selected' if defaults.vad_engine == 'ten' }}>ten (TEN VAD)</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Max speech segment (s)</label>
+              <input type="number" step="0.1" class="form-control" name="vad_max_speech_s" value="{{ defaults.vad_max_speech_s }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Threshold</label>
+              <input type="number" step="0.01" class="form-control" name="vad_threshold" value="{{ defaults.vad_threshold }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Min speech (ms)</label>
+              <input type="number" class="form-control" name="vad_min_speech_ms" value="{{ defaults.vad_min_speech_ms }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Min silence (ms)</label>
+              <input type="number" class="form-control" name="vad_min_silence_ms" value="{{ defaults.vad_min_silence_ms }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Speech pad (ms)</label>
+              <input type="number" class="form-control" name="vad_speech_pad_ms" value="{{ defaults.vad_speech_pad_ms }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Segment gap - TEN VAD only (ms)</label>
+              <input type="number" class="form-control" name="vad_segment_gap_ms" value="{{ defaults.vad_segment_gap_ms }}">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelLlm">
+            LLM quality-check pipeline
+          </button>
+        </h2>
+        <div id="panelLlm" class="accordion-collapse collapse" data-bs-parent="#advanced">
+          <div class="accordion-body row g-3">
+            <div class="col-md-6">
+              <label class="form-label">LLM endpoint</label>
+              <input type="text" class="form-control" name="llm_endpoint" value="{{ defaults.llm_endpoint }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">LLM model</label>
+              <input type="text" class="form-control" name="llm_model" value="{{ defaults.llm_model }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Context primer frames</label>
+              <input type="number" class="form-control" name="context_primer_frames" value="{{ defaults.context_primer_frames }}">
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="no_llm_check" id="no_llm_check">
+                <label class="form-check-label" for="no_llm_check">Skip LLM cleanup</label>
+              </div>
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="no_llm_vision" id="no_llm_vision">
+                <label class="form-check-label" for="no_llm_vision">Disable vision</label>
+              </div>
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="no_context_primer" id="no_context_primer">
+                <label class="form-check-label" for="no_context_primer">Skip context primer</label>
+              </div>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="auto_confirm" id="auto_confirm">
+                <label class="form-check-label" for="auto_confirm">Auto-confirm all fixes</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="col-12 mt-4">
+      <button type="submit" class="btn btn-primary" id="runBtn">Run</button>
+    </div>
+  </form>
+
+  <div class="mt-4">
+    <h5>Log</h5>
+    <div id="log"></div>
+  </div>
+
+  <div id="confirmArea" class="mt-4 card">
+    <div class="card-body">
+      <h5 id="confirmTitle" class="card-title"></h5>
+      <div id="confirmBody"></div>
+      <div id="confirmButtons" class="mt-3"></div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
