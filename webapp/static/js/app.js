@@ -283,12 +283,10 @@ function renderVadViz() {
     x: scaleX(s), w: scaleX(e) - scaleX(s), title: `${s.toFixed(2)}s-${e.toFixed(2)}s (${(e - s).toFixed(2)}s)`,
   }));
 
-  let svg = `<svg viewBox="0 0 ${W} 100" width="100%" height="100">`;
-  svg += svgTimelineRow(30, "Detected speech (raw)", x0, xw, rawBoxes, "#0d6efd");
-  svg += svgTimelineRow(80, "Kept & padded segments (sent to whisper)", x0, xw, finalBoxes, "#198754");
-  svg += `</svg>`;
-
-  let html = svg;
+  const rows = [
+    { label: "Detected speech (raw)", boxes: rawBoxes, color: "#0d6efd" },
+    { label: "Kept & padded segments (sent to whisper)", boxes: finalBoxes, color: "#198754" },
+  ];
   if (engine === "ten") {
     const gapS = gapMs / 1000;
     const totalDur = segments.reduce((sum, [s, e]) => sum + (e - s), 0) + gapS * Math.max(0, segments.length - 1);
@@ -305,11 +303,20 @@ function renderVadViz() {
         cursor += gw;
       }
     });
-    html += `<svg viewBox="0 0 ${W} 50" width="100%" height="50">`;
-    html += svgTimelineRow(30, "Trimmed audio actually sent to whisper (TEN VAD only)", x0, xw, concatBoxes, "#198754");
-    html += `</svg>`;
+    rows.push({ label: "Trimmed audio actually sent to whisper (TEN VAD only)", boxes: concatBoxes, color: "#198754" });
   }
-  vizEl.innerHTML = html;
+
+  // all rows in a single SVG (not several concatenated <svg> elements) with generous
+  // per-row spacing, so labels/boxes never crowd into the row above or below
+  const ROW_H = 55;
+  const H = ROW_H * rows.length + 15;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
+  rows.forEach((row, i) => {
+    const y = ROW_H * i + 40;
+    svg += svgTimelineRow(y, row.label, x0, xw, row.boxes, row.color);
+  });
+  svg += `</svg>`;
+  vizEl.innerHTML = svg;
 
   let note = `${VAD_RAW_RUNS.length} raw speech blips -> ${segments.length} final segment(s) sent to whisper`;
   if (droppedCount > 0) note += `, ${droppedCount} short blip(s) dropped entirely (below min speech duration)`;
