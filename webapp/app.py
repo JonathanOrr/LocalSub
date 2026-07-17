@@ -1,11 +1,14 @@
 import dataclasses
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request
 
 from pipeline.orchestrate import PipelineConfig
-from pipeline.whisper_engine import WHISPER_LANGUAGES
+from pipeline.vad_ten import detect_raw_speech_runs
+from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio
 from webapp.runner import JOBS, start_job, submit_confirm
 
 app = Flask(__name__)
@@ -42,6 +45,64 @@ def browse():
         return jsonify({"error": str(e)}), 400
     parent = str(path.parent) if path.parent != path else None
     return jsonify({"path": str(path), "parent": parent, "entries": entries})
+
+
+@app.route("/api/vad_analyze", methods=["POST"])
+def vad_analyze():
+    """Extract audio from a real video and run TEN VAD's frame classification (only - no
+    merge/discard/pad/split yet) so the web UI's VAD diagram can preview real detected
+    speech instead of its synthetic example. Only re-run when the threshold changes - every
+    other VAD knob is cheap post-processing math the frontend already redoes instantly in
+    JS (computeVadSegments) against whatever raw_runs this returns."""
+    data = request.get_json(force=True)
+    video_path = Path(data.get("video_path", ""))
+    try:
+        threshold = float(data.get("vad_threshold", 0.5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "vad_threshold must be a number"}), 400
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            wav_path = extract_audio(video_path, Path(tmpdir))
+            raw_runs, duration_s = detect_raw_speech_runs(wav_path, threshold)
+        except SystemExit as e:
+            return jsonify({"error": str(e)}), 400
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"ffmpeg failed: {e}"}), 500
+
+    return jsonify({"raw_runs": raw_runs, "duration_s": duration_s})
+
+
+@app.route("/api/audio_clip")
+def audio_clip():
+    """Extract a short audio clip on demand (not pre-extracted/cached - a single short clip
+    is fast enough that there's no real benefit to caching, and it avoids needing to think
+    about cache invalidation) so the web UI can let you click a VAD segment and hear it."""
+    raw_path = request.args.get("path", "")
+    start_raw, end_raw = request.args.get("start"), request.args.get("end")
+    if start_raw is None or end_raw is None:
+        return jsonify({"error": "start/end are required"}), 400
+    try:
+        start, end = float(start_raw), float(end_raw)
+    except ValueError:
+        return jsonify({"error": "start/end must be numbers"}), 400
+    if start < 0 or end <= start:
+        return jsonify({"error": "invalid start/end range"}), 400
+
+    video_path = Path(raw_path)
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+
+    cmd = [
+        "ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(video_path),
+        "-t", f"{end - start:.3f}", "-vn", "-f", "mp3", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        return jsonify({"error": proc.stderr.decode(errors="replace")}), 500
+    return Response(proc.stdout, mimetype="audio/mpeg")
 
 
 @app.route("/api/jobs", methods=["POST"])

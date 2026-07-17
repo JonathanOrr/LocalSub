@@ -8,6 +8,8 @@
     #log { background: #111; color: #ddd; font-family: monospace; font-size: 0.85rem; height: 320px;
            overflow-y: auto; white-space: pre-wrap; padding: 0.75rem; border-radius: 0.375rem; }
     #confirmArea { display: none; }
+    #vadViz rect.vad-playable { cursor: pointer; }
+    #vadViz rect.vad-playable:hover { opacity: 0.8; }
     .accordion-header { position: relative; }
     .accordion-reset-btn {
       position: absolute; top: 50%; right: 3rem; transform: translateY(-50%); z-index: 10;
@@ -157,10 +159,12 @@
               <p class="text-muted small mb-1">
                 How these settings would reshape a representative stretch of fast
                 back-and-forth dialogue (a short interjection, two close sentences, a longer
-                pause, and one long unbroken monologue) - not your actual audio, just an
-                illustration of what each knob does.
+                pause, and one long unbroken monologue) - not your actual audio, unless you
+                analyze your real video below, in which case click a segment to hear it.
               </p>
-              <div id="vadViz"></div>
+              <button type="button" class="btn btn-sm btn-outline-primary" id="vadAnalyzeBtn">Analyze this video (real VAD)</button>
+              <span id="vadAnalyzeStatus" class="text-muted small ms-2"></span>
+              <div id="vadViz" class="mt-2"></div>
               <p id="vadVizNote" class="text-muted small mt-1 mb-0"></p>
             </div>
           </div>

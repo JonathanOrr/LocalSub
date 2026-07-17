@@ -228,6 +228,10 @@ const VAD_RAW_RUNS = [
 ];
 const VAD_TIMELINE_END = 15.0;
 
+// Set once "Analyze this video" succeeds: { videoPath, rawRuns, durationS }. While null, the
+// diagram runs against the synthetic timeline above instead.
+let realVadData = null;
+
 function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS) {
   let merged = [rawRuns[0].slice()];
   for (let i = 1; i < rawRuns.length; i++) {
@@ -276,8 +280,11 @@ function svgTimelineRow(y, label, x0, xw, boxes, color) {
   // ascender reaches ~8-9 units above its own baseline, so y-8 put the two touching)
   let s = `<text x="0" y="${y - 20}" font-size="11" fill="#666">${label}</text>`;
   s += `<line x1="${x0}" y1="${y}" x2="${x0 + xw}" y2="${y}" stroke="#dee2e6" stroke-width="1"/>`;
-  boxes.forEach(({ x, w, title, fill }) => {
-    s += `<rect x="${x}" y="${y - 10}" width="${Math.max(2, w)}" height="20" fill="${fill || color}" rx="3"><title>${title}</title></rect>`;
+  boxes.forEach(({ x, w, title, fill, playStart, playEnd }) => {
+    const playable = playStart !== undefined && playEnd !== undefined;
+    const cls = playable ? ' class="vad-playable"' : "";
+    const dataAttrs = playable ? ` data-start="${playStart}" data-end="${playEnd}"` : "";
+    s += `<rect x="${x}" y="${y - 10}" width="${Math.max(2, w)}" height="20" fill="${fill || color}" rx="3"${cls}${dataAttrs}><title>${title}</title></rect>`;
   });
   return s;
 }
@@ -294,20 +301,27 @@ function renderVadViz() {
   const gapMs = parseFloat(form.querySelector('[name="vad_segment_gap_ms"]').value) || 0;
   const engine = form.querySelector('[name="vad_engine"]').value;
 
-  const { segments, droppedCount } = computeVadSegments(VAD_RAW_RUNS, minSpeechMs, minSilenceMs, padMs, maxSpeechS);
+  const usingReal = realVadData !== null;
+  const rawRuns = usingReal ? realVadData.rawRuns : VAD_RAW_RUNS;
+  const timelineEnd = usingReal ? realVadData.durationS : VAD_TIMELINE_END;
+
+  const { segments, droppedCount } = computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS);
 
   const W = 800, x0 = 4, xw = W - 8;
-  const scaleX = (t) => x0 + (t / VAD_TIMELINE_END) * xw;
+  const scaleX = (t) => x0 + (timelineEnd > 0 ? (t / timelineEnd) * xw : 0);
 
-  const rawBoxes = VAD_RAW_RUNS.map(([s, e]) => ({
+  const rawBoxes = rawRuns.map(([s, e]) => ({
     x: scaleX(s), w: scaleX(e) - scaleX(s), title: `${s.toFixed(2)}s-${e.toFixed(2)}s`,
+    ...(usingReal ? { playStart: s, playEnd: e } : {}),
   }));
   const finalBoxes = segments.map(([s, e]) => ({
     x: scaleX(s), w: scaleX(e) - scaleX(s), title: `${s.toFixed(2)}s-${e.toFixed(2)}s (${(e - s).toFixed(2)}s)`,
+    ...(usingReal ? { playStart: s, playEnd: e } : {}),
   }));
 
+  const rawLabel = usingReal ? "Detected speech (raw) - your video" : "Detected speech (raw) - synthetic example";
   const rows = [
-    { label: "Detected speech (raw)", boxes: rawBoxes, color: "#0d6efd" },
+    { label: rawLabel, boxes: rawBoxes, color: "#0d6efd" },
     { label: "Kept & padded segments (sent to whisper)", boxes: finalBoxes, color: "#198754" },
   ];
   if (engine === "ten") {
@@ -318,7 +332,10 @@ function renderVadViz() {
     const concatBoxes = [];
     segments.forEach(([s, e], i) => {
       const w = (e - s) * scale;
-      concatBoxes.push({ x: cursor, w, title: `${(e - s).toFixed(2)}s`, fill: "#198754" });
+      concatBoxes.push({
+        x: cursor, w, title: `${(e - s).toFixed(2)}s`, fill: "#198754",
+        ...(usingReal ? { playStart: s, playEnd: e } : {}),
+      });
       cursor += w;
       if (i < segments.length - 1) {
         const gw = gapS * scale;
@@ -341,7 +358,9 @@ function renderVadViz() {
   svg += `</svg>`;
   vizEl.innerHTML = svg;
 
-  let note = `${VAD_RAW_RUNS.length} raw speech blips -> ${segments.length} final segment(s) sent to whisper`;
+  let note = usingReal
+    ? `${rawRuns.length} real speech blips -> ${segments.length} final segment(s) sent to whisper (click a box to hear it)`
+    : `${rawRuns.length} raw speech blips -> ${segments.length} final segment(s) sent to whisper`;
   if (droppedCount > 0) note += `, ${droppedCount} short blip(s) dropped entirely (below min speech duration)`;
   noteEl.textContent = note;
 }
@@ -353,3 +372,75 @@ function renderVadViz() {
     el.addEventListener("change", renderVadViz);
   });
 renderVadViz();
+
+// "Analyze this video" - fetches real raw VAD runs once (expensive: extracts audio + runs
+// VAD inference), then renderVadViz()'s existing math takes it from there for every other
+// slider. Only vad_threshold changes what counts as "speech" at the frame level, so it's
+// the one field that also needs a fresh analyze - every other VAD field is cheap
+// post-processing math already computed instantly client-side.
+const vadAnalyzeBtn = document.getElementById("vadAnalyzeBtn");
+const vadAnalyzeStatus = document.getElementById("vadAnalyzeStatus");
+
+function runVadAnalyze() {
+  const videoPath = videoPathInput.value.trim();
+  if (!videoPath) {
+    vadAnalyzeStatus.textContent = "Enter a video path above first.";
+    return;
+  }
+  const threshold = parseFloat(form.querySelector('[name="vad_threshold"]').value) || 0.5;
+  vadAnalyzeBtn.disabled = true;
+  vadAnalyzeStatus.textContent = "Analyzing (extracting audio + running VAD)...";
+  fetch("/api/vad_analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_path: videoPath, vad_threshold: threshold }),
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      vadAnalyzeBtn.disabled = false;
+      if (data.error) {
+        vadAnalyzeStatus.textContent = `Error: ${data.error}`;
+        return;
+      }
+      realVadData = { videoPath, rawRuns: data.raw_runs, durationS: data.duration_s };
+      vadAnalyzeStatus.textContent = `Analyzed ${videoPath.split("/").pop()} (${data.duration_s.toFixed(1)}s)`;
+      renderVadViz();
+    })
+    .catch((err) => {
+      vadAnalyzeBtn.disabled = false;
+      vadAnalyzeStatus.textContent = `Error: ${err}`;
+    });
+}
+vadAnalyzeBtn.addEventListener("click", runVadAnalyze);
+
+// changing vad_threshold invalidates the analyzed data (it affects what counts as "speech"
+// in the first place), and changing the video path entirely obviously does too - both just
+// fall back to the synthetic timeline until re-analyzed, rather than silently showing stale
+// results for a different video/threshold.
+form.querySelector('[name="vad_threshold"]').addEventListener("change", () => {
+  if (realVadData) {
+    realVadData = null;
+    vadAnalyzeStatus.textContent = "Threshold changed - click Analyze again to refresh.";
+    renderVadViz();
+  }
+});
+videoPathInput.addEventListener("input", () => {
+  if (realVadData && realVadData.videoPath !== videoPathInput.value.trim()) {
+    realVadData = null;
+    vadAnalyzeStatus.textContent = "Video path changed - click Analyze again to refresh.";
+    renderVadViz();
+  }
+});
+
+// click-to-play: boxes are only playable when using real data (a delegated listener since
+// the SVG is regenerated via innerHTML on every render, so per-element listeners would be
+// lost each time anyway)
+document.getElementById("vadViz").addEventListener("click", (e) => {
+  const rect = e.target.closest("rect.vad-playable");
+  if (!rect || !realVadData) return;
+  const start = rect.dataset.start, end = rect.dataset.end;
+  const url = `/api/audio_clip?path=${encodeURIComponent(realVadData.videoPath)}&start=${start}&end=${end}`;
+  new Audio(url).play().catch((err) => {
+    vadAnalyzeStatus.textContent = `Playback error: ${err}`;
+  });
+});
