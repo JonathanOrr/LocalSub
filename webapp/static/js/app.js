@@ -76,6 +76,31 @@ resetBtn.addEventListener("click", () => {
   form.reset();
   renderVadViz();
 });
+
+// Per-section "Reset section" buttons: form.reset() only resets the whole form, so reset
+// just the fields inside the given container back to their defaultValue/defaultChecked/
+// defaultSelected - the same server-rendered defaults form.reset() itself relies on.
+function resetFieldsIn(container) {
+  container.querySelectorAll("input, select").forEach((el) => {
+    if (el.type === "checkbox" || el.type === "radio") {
+      el.checked = el.defaultChecked;
+    } else if (el.tagName === "SELECT") {
+      Array.from(el.options).forEach((opt) => {
+        opt.selected = opt.defaultSelected;
+      });
+    } else {
+      el.value = el.defaultValue;
+    }
+  });
+}
+
+document.querySelectorAll(".section-reset-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const target = document.getElementById(btn.dataset.resetTarget);
+    resetFieldsIn(target);
+    if (btn.dataset.resetTarget === "panelVad") renderVadViz();
+  });
+});
 const confirmBody = document.getElementById("confirmBody");
 const confirmButtons = document.getElementById("confirmButtons");
 
