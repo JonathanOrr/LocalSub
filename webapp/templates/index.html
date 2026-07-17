@@ -22,7 +22,11 @@
 
     <div class="col-md-3">
       <label class="form-label">Source language</label>
-      <input type="text" class="form-control" name="lang" value="{{ defaults.lang }}">
+      <select class="form-select" name="lang">
+        {% for code, name in languages %}
+        <option value="{{ code }}" {{ 'selected' if code == defaults.lang }}>{{ name }} ({{ code }})</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="col-md-3">
       <label class="form-label">Target language</label>

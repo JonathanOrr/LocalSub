@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request
 
 from pipeline.orchestrate import PipelineConfig
+from pipeline.whisper_engine import WHISPER_LANGUAGES
 from webapp.runner import JOBS, start_job, submit_confirm
 
 app = Flask(__name__)
@@ -12,7 +13,8 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return render_template("index.html", defaults=PipelineConfig())
+    languages = sorted(WHISPER_LANGUAGES.items(), key=lambda kv: kv[1])
+    return render_template("index.html", defaults=PipelineConfig(), languages=languages)
 
 
 @app.route("/api/jobs", methods=["POST"])
