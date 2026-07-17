@@ -14,17 +14,8 @@ const STR_FIELDS = [
 ];
 
 const form = document.getElementById("runForm");
-// autocomplete="off" stops the browser suggesting/restoring previously-typed values, but
-// doesn't cover the back/forward cache (bfcache), which restores the exact live DOM - form
-// values included - when navigating back to this page. Force a real reset in that case so
-// the form always starts from the server-rendered defaults, not whatever was last typed.
-window.addEventListener("pageshow", (e) => {
-  if (e.persisted) {
-    form.reset();
-    renderVadViz();
-  }
-});
 const runBtn = document.getElementById("runBtn");
+const resetBtn = document.getElementById("resetBtn");
 const logEl = document.getElementById("log");
 const confirmArea = document.getElementById("confirmArea");
 const confirmTitle = document.getElementById("confirmTitle");
@@ -79,6 +70,11 @@ function loadBrowse(path) {
 document.getElementById("browseBtn").addEventListener("click", () => {
   loadBrowse(videoPathInput.value || null);
   browseModal.show();
+});
+
+resetBtn.addEventListener("click", () => {
+  form.reset();
+  renderVadViz();
 });
 const confirmBody = document.getElementById("confirmBody");
 const confirmButtons = document.getElementById("confirmButtons");
