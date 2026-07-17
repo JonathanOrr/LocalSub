@@ -181,3 +181,135 @@ form.addEventListener("submit", (e) => {
       };
     });
 });
+
+// --- VAD settings visualization ---
+// A fixed, synthetic "representative dialogue" timeline (seconds) - not real audio, just
+// something to run the actual merge/pad/split math against so the diagram reacts to
+// whatever the user currently has the VAD fields set to. Mirrors ten_vad_speech_segments()
+// in pipeline/vad_ten.py: merge across short silences, drop too-short blips, pad, re-merge
+// any overlaps padding creates, then force-split anything too long.
+const VAD_RAW_RUNS = [
+  [0.5, 0.65], // a short interjection - likely dropped by min-speech-duration
+  [1.5, 2.3], // sentence A
+  [2.42, 3.1], // sentence B, only 120ms after A - candidate for min-silence merging
+  [4.5, 12.5], // one long unbroken monologue - candidate for force-splitting
+  [13.5, 13.9], // a trailing short blip
+];
+const VAD_TIMELINE_END = 15.0;
+
+function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS) {
+  let merged = [rawRuns[0].slice()];
+  for (let i = 1; i < rawRuns.length; i++) {
+    const [start, end] = rawRuns[i];
+    const gapMs = (start - merged[merged.length - 1][1]) * 1000;
+    if (gapMs <= minSilenceMs) {
+      merged[merged.length - 1][1] = end;
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  const kept = merged.filter(([s, e]) => (e - s) * 1000 >= minSpeechMs);
+  const droppedCount = merged.length - kept.length;
+  if (kept.length === 0) return { segments: [], droppedCount };
+
+  const padS = padMs / 1000;
+  const padded = kept.map(([s, e]) => [Math.max(0, s - padS), Math.min(VAD_TIMELINE_END, e + padS)]);
+  let segments = [padded[0].slice()];
+  for (let i = 1; i < padded.length; i++) {
+    const [s, e] = padded[i];
+    if (s <= segments[segments.length - 1][1]) {
+      segments[segments.length - 1][1] = Math.max(segments[segments.length - 1][1], e);
+    } else {
+      segments.push([s, e]);
+    }
+  }
+
+  let final = [];
+  for (const [s, e] of segments) {
+    const dur = e - s;
+    if (maxSpeechS <= 0 || dur <= maxSpeechS) {
+      final.push([s, e]);
+      continue;
+    }
+    const nChunks = Math.ceil(dur / maxSpeechS);
+    const chunkLen = dur / nChunks;
+    for (let k = 0; k < nChunks; k++) {
+      final.push([s + k * chunkLen, Math.min(e, s + (k + 1) * chunkLen)]);
+    }
+  }
+  return { segments: final, droppedCount };
+}
+
+function svgTimelineRow(y, label, x0, xw, boxes, color) {
+  let s = `<text x="0" y="${y - 8}" font-size="11" fill="#666">${label}</text>`;
+  s += `<line x1="${x0}" y1="${y}" x2="${x0 + xw}" y2="${y}" stroke="#dee2e6" stroke-width="1"/>`;
+  boxes.forEach(({ x, w, title, fill }) => {
+    s += `<rect x="${x}" y="${y - 10}" width="${Math.max(2, w)}" height="20" fill="${fill || color}" rx="3"><title>${title}</title></rect>`;
+  });
+  return s;
+}
+
+function renderVadViz() {
+  const vizEl = document.getElementById("vadViz");
+  const noteEl = document.getElementById("vadVizNote");
+  if (!vizEl) return;
+
+  const minSpeechMs = parseFloat(form.querySelector('[name="vad_min_speech_ms"]').value) || 0;
+  const minSilenceMs = parseFloat(form.querySelector('[name="vad_min_silence_ms"]').value) || 0;
+  const padMs = parseFloat(form.querySelector('[name="vad_speech_pad_ms"]').value) || 0;
+  const maxSpeechS = parseFloat(form.querySelector('[name="vad_max_speech_s"]').value) || 0;
+  const gapMs = parseFloat(form.querySelector('[name="vad_segment_gap_ms"]').value) || 0;
+  const engine = form.querySelector('[name="vad_engine"]').value;
+
+  const { segments, droppedCount } = computeVadSegments(VAD_RAW_RUNS, minSpeechMs, minSilenceMs, padMs, maxSpeechS);
+
+  const W = 800, x0 = 4, xw = W - 8;
+  const scaleX = (t) => x0 + (t / VAD_TIMELINE_END) * xw;
+
+  const rawBoxes = VAD_RAW_RUNS.map(([s, e]) => ({
+    x: scaleX(s), w: scaleX(e) - scaleX(s), title: `${s.toFixed(2)}s-${e.toFixed(2)}s`,
+  }));
+  const finalBoxes = segments.map(([s, e]) => ({
+    x: scaleX(s), w: scaleX(e) - scaleX(s), title: `${s.toFixed(2)}s-${e.toFixed(2)}s (${(e - s).toFixed(2)}s)`,
+  }));
+
+  let svg = `<svg viewBox="0 0 ${W} 100" width="100%" height="100">`;
+  svg += svgTimelineRow(30, "Detected speech (raw)", x0, xw, rawBoxes, "#0d6efd");
+  svg += svgTimelineRow(80, "Kept & padded segments (sent to whisper)", x0, xw, finalBoxes, "#198754");
+  svg += `</svg>`;
+
+  let html = svg;
+  if (engine === "ten") {
+    const gapS = gapMs / 1000;
+    const totalDur = segments.reduce((sum, [s, e]) => sum + (e - s), 0) + gapS * Math.max(0, segments.length - 1);
+    const scale = totalDur > 0 ? xw / totalDur : 1;
+    let cursor = x0;
+    const concatBoxes = [];
+    segments.forEach(([s, e], i) => {
+      const w = (e - s) * scale;
+      concatBoxes.push({ x: cursor, w, title: `${(e - s).toFixed(2)}s`, fill: "#198754" });
+      cursor += w;
+      if (i < segments.length - 1) {
+        const gw = gapS * scale;
+        concatBoxes.push({ x: cursor, w: gw, title: `${gapMs}ms silence gap`, fill: "#adb5bd" });
+        cursor += gw;
+      }
+    });
+    html += `<svg viewBox="0 0 ${W} 50" width="100%" height="50">`;
+    html += svgTimelineRow(30, "Trimmed audio actually sent to whisper (TEN VAD only)", x0, xw, concatBoxes, "#198754");
+    html += `</svg>`;
+  }
+  vizEl.innerHTML = html;
+
+  let note = `${VAD_RAW_RUNS.length} raw speech blips -> ${segments.length} final segment(s) sent to whisper`;
+  if (droppedCount > 0) note += `, ${droppedCount} short blip(s) dropped entirely (below min speech duration)`;
+  noteEl.textContent = note;
+}
+
+["vad_min_speech_ms", "vad_min_silence_ms", "vad_speech_pad_ms", "vad_max_speech_s", "vad_segment_gap_ms", "vad_engine"]
+  .forEach((name) => {
+    const el = form.querySelector(`[name="${name}"]`);
+    el.addEventListener("input", renderVadViz);
+    el.addEventListener("change", renderVadViz);
+  });
+renderVadViz();

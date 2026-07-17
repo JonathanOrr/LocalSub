@@ -146,6 +146,17 @@
               <label class="form-label">Segment gap - TEN VAD only (ms)</label>
               <input type="number" class="form-control" name="vad_segment_gap_ms" value="{{ defaults.vad_segment_gap_ms }}">
             </div>
+            <div class="col-12">
+              <hr>
+              <p class="text-muted small mb-1">
+                How these settings would reshape a representative stretch of fast
+                back-and-forth dialogue (a short interjection, two close sentences, a longer
+                pause, and one long unbroken monologue) - not your actual audio, just an
+                illustration of what each knob does.
+              </p>
+              <div id="vadViz"></div>
+              <p id="vadVizNote" class="text-muted small mt-1 mb-0"></p>
+            </div>
           </div>
         </div>
       </div>
