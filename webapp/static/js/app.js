@@ -251,7 +251,9 @@ function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeech
 }
 
 function svgTimelineRow(y, label, x0, xw, boxes, color) {
-  let s = `<text x="0" y="${y - 8}" font-size="11" fill="#666">${label}</text>`;
+  // label sits a full text-height clear of the box row below it (a font-size-11 glyph's
+  // ascender reaches ~8-9 units above its own baseline, so y-8 put the two touching)
+  let s = `<text x="0" y="${y - 20}" font-size="11" fill="#666">${label}</text>`;
   s += `<line x1="${x0}" y1="${y}" x2="${x0 + xw}" y2="${y}" stroke="#dee2e6" stroke-width="1"/>`;
   boxes.forEach(({ x, w, title, fill }) => {
     s += `<rect x="${x}" y="${y - 10}" width="${Math.max(2, w)}" height="20" fill="${fill || color}" rx="3"><title>${title}</title></rect>`;
