@@ -8,6 +8,10 @@
     #log { background: #111; color: #ddd; font-family: monospace; font-size: 0.85rem; height: 320px;
            overflow-y: auto; white-space: pre-wrap; padding: 0.75rem; border-radius: 0.375rem; }
     #confirmArea { display: none; }
+    .accordion-header { position: relative; }
+    .accordion-reset-btn {
+      position: absolute; top: 50%; right: 3rem; transform: translateY(-50%); z-index: 10;
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -56,12 +60,10 @@
           <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelBasic">
             Whisper / decoding
           </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary accordion-reset-btn section-reset-btn" data-reset-target="panelBasic">Reset</button>
         </h2>
         <div id="panelBasic" class="accordion-collapse collapse" data-bs-parent="#advanced">
           <div class="accordion-body row g-3">
-            <div class="col-12 text-end">
-              <button type="button" class="btn btn-sm btn-outline-secondary section-reset-btn" data-reset-target="panelBasic">Reset section</button>
-            </div>
             <div class="col-md-4">
               <label class="form-label">Model</label>
               <input type="text" class="form-control" name="model" value="{{ defaults.model }}">
@@ -109,12 +111,10 @@
           <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelVad">
             Voice Activity Detection (VAD)
           </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary accordion-reset-btn section-reset-btn" data-reset-target="panelVad">Reset</button>
         </h2>
         <div id="panelVad" class="accordion-collapse collapse" data-bs-parent="#advanced">
           <div class="accordion-body row g-3">
-            <div class="col-12 text-end">
-              <button type="button" class="btn btn-sm btn-outline-secondary section-reset-btn" data-reset-target="panelVad">Reset section</button>
-            </div>
             <div class="col-md-4 d-flex align-items-end">
               <div class="form-check">
                 <input class="form-check-input" type="checkbox" name="vad" id="vad">
@@ -172,12 +172,10 @@
           <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#panelLlm">
             LLM quality-check pipeline
           </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary accordion-reset-btn section-reset-btn" data-reset-target="panelLlm">Reset</button>
         </h2>
         <div id="panelLlm" class="accordion-collapse collapse" data-bs-parent="#advanced">
           <div class="accordion-body row g-3">
-            <div class="col-12 text-end">
-              <button type="button" class="btn btn-sm btn-outline-secondary section-reset-btn" data-reset-target="panelLlm">Reset section</button>
-            </div>
             <div class="col-md-6">
               <label class="form-label">LLM endpoint</label>
               <input type="text" class="form-control" name="llm_endpoint" value="{{ defaults.llm_endpoint }}">
