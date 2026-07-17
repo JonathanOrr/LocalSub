@@ -147,15 +147,13 @@ def llm_vision_resolve(
                     write_raw_log_entry(raw_log_path, f.first_cue, f.last_cue, content, message)
                 reply = (message.get("content") or "").strip()
                 fix_match = LLM_VISION_FIX_RE.search(reply)
-                reason_match = LLM_VISION_REASON_RE.search(reply)
-                if fix_match and fix_match.group(1).strip():
+                if fix_match:
+                    # an empty capture is the model deliberately leaving FIX blank (a valid
+                    # "delete this cue" signal, not a parsing failure) - fix_text being falsy
+                    # already makes the change below a deletion (replacement=None)
                     fix_text = fix_match.group(1).strip()
+                    reason_match = LLM_VISION_REASON_RE.search(reply)
                     reason = reason_match.group(1).strip() if reason_match else reply
-                elif reason_match:
-                    # model gave a reason but no distinct fix (e.g. merged FIX/REASON onto
-                    # one line with nothing in between) - keep the original text-only guess
-                    # rather than overwriting the cue with blank or misparsed text
-                    reason = reason_match.group(1).strip()
                 elif reply:
                     reason = f"vision reply didn't match expected format: {reply}"
                 else:
