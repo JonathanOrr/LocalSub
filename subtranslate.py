@@ -114,6 +114,10 @@ def main() -> None:
                               "context primer (default: 12). Fixed regardless of video length, "
                               "so cost doesn't scale with runtime. Set to 0 for a text-only "
                               "primer without vision")
+    parser.add_argument("--no-transcript-review", action="store_true",
+                         help="skip the pre-translation pause that lets you fix transcription "
+                              "mistakes by hand ('e' opens the source-language .srt in $EDITOR, "
+                              "default nano) - useful to disable for non-interactive runs")
     parser.add_argument("--auto-confirm", action="store_true",
                          help="accept all LLM-proposed transcript fixes without an interactive "
                               "prompt (needed for non-interactive/background runs, which would "

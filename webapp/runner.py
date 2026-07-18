@@ -7,6 +7,7 @@ from typing import Any
 
 from pipeline.changes import ProposedChange
 from pipeline.orchestrate import PipelineConfig, run_pipeline
+from pipeline.transcript_review import validate_and_renumber
 
 JOBS: dict[str, "Job"] = {}
 
@@ -84,6 +85,33 @@ def make_web_confirm_primer(job: Job):
     return web_confirm_primer
 
 
+def make_web_confirm_transcript(job: Job):
+    """Drop-in replacement for pipeline.transcript_review.confirm_transcript: instead of
+    opening $EDITOR on the file, publishes the current SRT text onto the job so the browser
+    can show it in an editable textarea, then blocks until the browser POSTs the (possibly
+    unedited) text back."""
+    def web_confirm_transcript(srt_path: Path, auto_confirm: bool) -> None:
+        if auto_confirm:
+            return
+        original = srt_path.read_text(encoding="utf-8")
+        job.confirm_event.clear()
+        job.pending_confirm = {"kind": "transcript", "transcript": original}
+        job.status = "waiting_confirm"
+        job.emit({"type": "confirm_request", **job.pending_confirm})
+        job.confirm_event.wait()
+        job.status = "running"
+        response = job.confirm_response or {}
+        job.pending_confirm = None
+        edited = response.get("text")
+        if edited is None or edited == original:
+            return
+        srt_path.write_text(edited, encoding="utf-8")
+        if not validate_and_renumber(srt_path):
+            job.log("  [WARNING] edited transcript didn't look like valid SRT - reverting to the pre-edit version")
+            srt_path.write_text(original, encoding="utf-8")
+    return web_confirm_transcript
+
+
 def start_job(video_path: Path, config: PipelineConfig) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = Job(id=job_id)
@@ -95,6 +123,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 video_path, config,
                 confirm_changes_fn=make_web_confirm_changes(job),
                 confirm_primer_fn=make_web_confirm_primer(job),
+                confirm_transcript_fn=make_web_confirm_transcript(job),
                 log_fn=job.log,
             )
             job.result = {

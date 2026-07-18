@@ -1,6 +1,6 @@
 const BOOL_FIELDS = [
   "no_translate", "no_gpu", "vad", "no_llm_check", "no_llm_vision",
-  "no_context_primer", "auto_confirm",
+  "no_context_primer", "no_transcript_review", "auto_confirm",
 ];
 const INT_FIELDS = [
   "threads", "max_context", "flag_repeat_count", "vad_min_speech_ms",
@@ -176,6 +176,25 @@ function showPrimerConfirm(event) {
   confirmArea.style.display = "block";
 }
 
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function showTranscriptConfirm(event) {
+  confirmTitle.textContent = "Review transcript before translation";
+  confirmBody.innerHTML = `
+    <p class="text-muted small">Fix any transcription mistakes here before it's sent for translation.</p>
+    <textarea class="form-control" rows="16" style="font-family: monospace" id="transcriptText">${escapeHtml(event.transcript)}</textarea>
+  `;
+  confirmButtons.innerHTML = `<button class="btn btn-primary btn-sm" id="continueTranscript">Continue</button>`;
+  document.getElementById("continueTranscript").onclick = () => {
+    submitConfirm({ text: document.getElementById("transcriptText").value });
+  };
+  confirmArea.style.display = "block";
+}
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   runBtn.disabled = true;
@@ -198,6 +217,7 @@ form.addEventListener("submit", (e) => {
         } else if (event.type === "confirm_request") {
           if (event.kind === "changes") showChangesConfirm(event);
           else if (event.kind === "primer") showPrimerConfirm(event);
+          else if (event.kind === "transcript") showTranscriptConfirm(event);
         } else if (event.type === "done") {
           appendLog(`\nDone: ${event.output_path}`);
           appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);

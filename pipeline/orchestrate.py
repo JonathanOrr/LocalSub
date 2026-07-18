@@ -9,12 +9,14 @@ from pipeline.context_primer import build_context_primer, confirm_context_primer
 from pipeline.rationality import llm_check_rationality, llm_vision_resolve, rationality_flag_to_change
 from pipeline.repeats import detect_char_repeats, detect_repeats, llm_resolve_repeats
 from pipeline.srt_utils import parse_srt_cues, write_srt
+from pipeline.transcript_review import confirm_transcript
 from pipeline.translate import llm_translate
 from pipeline.vad_ten import build_vad_trimmed_wav, remap_srt_timestamps, ten_vad_speech_segments
 from pipeline.whisper_engine import check_dependencies, extract_audio, language_info, mux, transcribe
 
 ConfirmChangesFn = Callable[[str, list[ProposedChange], bool], list[ProposedChange]]
 ConfirmPrimerFn = Callable[[str, bool], str | None]
+ConfirmTranscriptFn = Callable[[Path, bool], None]
 
 
 @dataclass
@@ -49,6 +51,7 @@ class PipelineConfig:
     no_llm_vision: bool = False
     no_context_primer: bool = False
     context_primer_frames: int = 12
+    no_transcript_review: bool = False
     auto_confirm: bool = False
 
 
@@ -65,14 +68,16 @@ def run_pipeline(
     video_path: Path, config: PipelineConfig,
     confirm_changes_fn: ConfirmChangesFn = confirm_changes,
     confirm_primer_fn: ConfirmPrimerFn = confirm_context_primer,
+    confirm_transcript_fn: ConfirmTranscriptFn = confirm_transcript,
     log_fn: Callable[[str], None] = print,
 ) -> PipelineResult:
     """The full pipeline: extract audio -> (optional TEN VAD pre-pass) -> transcribe ->
-    (optional) repeat-resolution -> context primer -> rationality+vision check -> translate
-    -> mux. Shared by subtranslate.py's CLI and the web UI - the only things either caller
-    customizes are how a proposed-changes/primer confirmation is obtained (confirm_changes_fn/
-    confirm_primer_fn - block on a terminal prompt for the CLI, wait on a browser click for
-    the web UI) and where status lines go (log_fn)."""
+    (optional) repeat-resolution -> context primer -> rationality+vision check ->
+    (optional) human transcript review -> translate -> mux. Shared by subtranslate.py's CLI
+    and the web UI - the only things either caller customizes are how a proposed-changes/
+    primer/transcript-edit confirmation is obtained (confirm_changes_fn/confirm_primer_fn/
+    confirm_transcript_fn - block on a terminal prompt for the CLI, wait on a browser click
+    for the web UI) and where status lines go (log_fn)."""
     if config.engine == "whisper" and config.target_lang != "en" and not config.no_translate:
         sys.exit(
             "whisper.cpp's built-in --translate only supports English as a target - "
@@ -182,6 +187,9 @@ def run_pipeline(
         )
         final_notes = [f"[{c.first_cue}-{c.last_cue}] {c.summary}" for c in confirmed2]
         write_srt(apply_changes(parse_srt_cues(src_srt), confirmed2), src_srt)
+
+    if not config.no_transcript_review:
+        confirm_transcript_fn(src_srt, config.auto_confirm)
 
     target_srt = None
     if not config.no_translate:
