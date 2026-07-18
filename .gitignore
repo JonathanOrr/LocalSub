@@ -2,12 +2,21 @@
 # it's a full separate project with its own multi-GB build artifacts and model weights.
 whisper.cpp/
 
-# Real test videos and their generated per-video output folders
-# (localsub.py writes outputs into a <video-stem>/ folder next to the input video,
-# e.g. test_jp2/ containing test_jp2.ja.srt, test_jp2.ja.llm_vision.md, etc. - those
-# logs embed base64 JPEG frames extracted straight from the source video, so this needs
-# to catch the whole output folder, not just specific file types.)
+# Real test videos/audio and their generated per-file output folders
+# (localsub.py writes outputs into a <file-stem>/ folder next to the input file, e.g.
+# test_jp2/ containing test_jp2.ja.srt, test_jp2.ja.llm_vision.md, etc. - those logs embed
+# base64 JPEG frames extracted straight from the source video, so this needs to catch the
+# whole output folder, not just specific file types. Covers audio-only input too - see
+# pipeline/orchestrate.py's AUDIO_EXTENSIONS.)
 test_*.mp4
+test_*.mp3
+test_*.wav
+test_*.m4a
+test_*.flac
+test_*.aac
+test_*.ogg
+test_*.opus
+test_*.wma
 test_*/
 
 # localsub.py's generated outputs, wherever they end up
