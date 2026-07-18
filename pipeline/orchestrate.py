@@ -6,6 +6,7 @@ from typing import Callable
 
 from pipeline.changes import ProposedChange, apply_changes, confirm_changes
 from pipeline.context_primer import build_context_primer, confirm_context_primer, default_primer_frame_plan
+from pipeline.errors import JobCancelled
 from pipeline.rationality import llm_check_rationality, llm_vision_resolve, rationality_flag_to_change
 from pipeline.repeats import detect_char_repeats, detect_repeats, llm_resolve_repeats
 from pipeline.srt_utils import parse_srt_cues, write_srt
@@ -109,6 +110,7 @@ def run_pipeline(
     confirm_primer_frames_fn: ConfirmPrimerFramesFn = confirm_primer_frames,
     log_fn: Callable[[str], None] = print,
     stage_fn: StageFn = lambda stage: None,
+    should_cancel: Callable[[], bool] = lambda: False,
 ) -> PipelineResult:
     """The full pipeline: extract audio -> (optional TEN VAD pre-pass) -> transcribe ->
     (optional) repeat-resolution -> primer-frame review -> context primer ->
@@ -122,7 +124,18 @@ def run_pipeline(
     CLI ignores it (its log lines already narrate progress); the web UI uses it to drive a
     structured progress indicator. A stage conditionally skipped by config (or, for
     "vision", skipped because no cue happened to need it) just never fires its call - the
-    caller decides how to represent that rather than this function announcing skips."""
+    caller decides how to represent that rather than this function announcing skips.
+    should_cancel is polled cooperatively at every stage boundary (via checked_stage below)
+    and threaded into the long-running per-item loops (subprocess output lines, per-batch/
+    per-flag LLM calls) - true raises JobCancelled, unwinding the whole run. The CLI never
+    passes one (defaults to a no-op, same as stage_fn); only the web UI's Cancel button
+    sets one. See pipeline/errors.py for why this can't be an instant kill of an in-flight
+    LLM call specifically."""
+    def checked_stage(name: str) -> None:
+        if should_cancel():
+            raise JobCancelled("cancelled by user")
+        stage_fn(name)
+
     if config.engine == "whisper" and config.target_lang != "en" and not config.no_translate:
         sys.exit(
             "whisper.cpp's built-in --translate only supports English as a target - "
@@ -149,8 +162,8 @@ def run_pipeline(
         config.model, use_vad=config.vad, vad_engine=config.vad_engine,
     )
 
-    stage_fn("audio")
-    wav_path = extract_audio(video_path, out_dir, log_fn=log_fn)
+    checked_stage("audio")
+    wav_path = extract_audio(video_path, out_dir, log_fn=log_fn, should_cancel=should_cancel)
 
     trim_map: list[tuple[float, float, float]] | None = None
     if config.vad and config.vad_engine == "ten":
@@ -166,7 +179,7 @@ def run_pipeline(
         else:
             log_fn("  [WARNING] TEN VAD found no speech segments - using the full audio unchanged")
 
-    stage_fn("transcribe")
+    checked_stage("transcribe")
     log_fn("[2/4] Transcribing (source language)")
     src_srt = transcribe(
         wav_path, model_path, config.lang, translate=False,
@@ -176,7 +189,7 @@ def run_pipeline(
         logprob_thold=config.logprob_thold, no_speech_thold=config.no_speech_thold,
         max_context=config.max_context, vad_threshold=config.vad_threshold,
         vad_min_speech_ms=config.vad_min_speech_ms, vad_min_silence_ms=config.vad_min_silence_ms,
-        vad_speech_pad_ms=config.vad_speech_pad_ms, log_fn=log_fn,
+        vad_speech_pad_ms=config.vad_speech_pad_ms, log_fn=log_fn, should_cancel=should_cancel,
     )
     if trim_map is not None:
         remap_srt_timestamps(src_srt, trim_map)
@@ -189,7 +202,7 @@ def run_pipeline(
         # disabling vision means no images anywhere, including user-pinned reference frames
         reference_frames = [] if no_llm_vision else _normalize_reference_frames(config.reference_frames)
 
-        stage_fn("repeats")
+        checked_stage("repeats")
         repeats = detect_repeats(src_srt, config.flag_repeat_count)
         repeats += detect_char_repeats(parse_srt_cues(src_srt), config.flag_repeat_count)
         repeats.sort(key=lambda r: int(r.first_cue))
@@ -212,14 +225,14 @@ def run_pipeline(
             # included in what's sent to the primer, just not re-editable at this stage. A
             # frame labeled during this review (whether it started blank or was relabeled)
             # also becomes a reference frame for every later vision follow-up call.
-            stage_fn("primer_frames")
+            checked_stage("primer_frames")
             primer_frame_count = 0 if no_llm_vision else config.context_primer_frames
             default_frames = default_primer_frame_plan(parse_srt_cues(src_srt), primer_frame_count)
             confirmed_default_frames = confirm_primer_frames_fn(default_frames, config.auto_confirm)
             primer_frames = confirmed_default_frames + reference_frames
             reference_frames = reference_frames + [(t, label) for t, label in confirmed_default_frames if label]
 
-            stage_fn("primer")
+            checked_stage("primer")
             log_fn("  Building context primer (characters/setting/tone) from the full transcript...")
             raw_primer = build_context_primer(
                 parse_srt_cues(src_srt), video_path, primer_frames, config.llm_endpoint, config.llm_model,
@@ -228,25 +241,26 @@ def run_pipeline(
             if raw_primer is not None:
                 context_primer = confirm_primer_fn(raw_primer, config.auto_confirm)
 
-        stage_fn("rationality")
+        checked_stage("rationality")
         log_fn(f"  Running LLM rationality check ({config.llm_model})...")
         cues = parse_srt_cues(src_srt)
         flags = llm_check_rationality(
             cues, config.llm_endpoint, config.llm_model,
             raw_log_path=out_dir / f"{src_srt.stem}.llm_rationality.md",
-            context_primer=context_primer,
+            context_primer=context_primer, should_cancel=should_cancel,
         )
         need_vision = [f for f in flags if f.needs_vision and not no_llm_vision]
         text_only = [f for f in flags if not (f.needs_vision and not no_llm_vision)]
 
         vision_changes = []
         if need_vision:
-            stage_fn("vision")
+            checked_stage("vision")
             log_fn(f"  Rationality check requested vision for {len(need_vision)} cue(s)...")
             vision_changes = llm_vision_resolve(
                 need_vision, cues, video_path, config.llm_endpoint, config.llm_model,
                 raw_log_path=out_dir / f"{src_srt.stem}.llm_vision.md",
                 context_primer=context_primer, reference_frames=reference_frames,
+                should_cancel=should_cancel,
             )
         cue_by_num = {int(num): ts for num, ts, text in cues}
         text_changes = []
@@ -265,7 +279,7 @@ def run_pipeline(
         write_srt(apply_changes(parse_srt_cues(src_srt), confirmed2), src_srt)
 
     if not config.no_transcript_review:
-        stage_fn("transcript_review")
+        checked_stage("transcript_review")
         before_review = {int(num): text for num, ts, text in parse_srt_cues(src_srt)}
         confirm_transcript_fn(src_srt, config.auto_confirm)
         if final_notes:
@@ -286,7 +300,7 @@ def run_pipeline(
 
     target_srt = None
     if not config.no_translate:
-        stage_fn("translate")
+        checked_stage("translate")
         _, target_lang_name = language_info(config.target_lang)
         log_fn(f"[3/4] Translating to {target_lang_name}")
         if config.engine == "llm":
@@ -296,6 +310,7 @@ def run_pipeline(
             translated_cues = llm_translate(
                 src_srt, config.llm_endpoint, config.llm_model, src_lang_name, target_lang_name,
                 raw_log_path=target_raw_log, review_notes=final_notes, context_primer=context_primer,
+                should_cancel=should_cancel,
             )
             write_srt(translated_cues, target_srt)
             log_fn(f"  Raw LLM output saved to {target_raw_log}")
@@ -308,18 +323,21 @@ def run_pipeline(
                 logprob_thold=config.logprob_thold, no_speech_thold=config.no_speech_thold,
                 max_context=config.max_context, vad_threshold=config.vad_threshold,
                 vad_min_speech_ms=config.vad_min_speech_ms, vad_min_silence_ms=config.vad_min_silence_ms,
-                vad_speech_pad_ms=config.vad_speech_pad_ms, log_fn=log_fn,
+                vad_speech_pad_ms=config.vad_speech_pad_ms, log_fn=log_fn, should_cancel=should_cancel,
             )
             if trim_map is not None:
                 remap_srt_timestamps(target_srt, trim_map)
 
-    stage_fn("mux")
+    checked_stage("mux")
     if is_audio_only:
         log_fn("  Audio-only input - skipping mux, the subtitle file(s) above are the final output")
         output_path = None
     else:
         output_path = out_dir / f"{video_path.stem}.output.mkv"
-        mux(video_path, src_srt, config.lang, target_srt, config.target_lang, output_path, log_fn=log_fn)
+        mux(
+            video_path, src_srt, config.lang, target_srt, config.target_lang, output_path,
+            log_fn=log_fn, should_cancel=should_cancel,
+        )
 
     return PipelineResult(
         output_path=output_path, src_srt=src_srt, target_srt=target_srt,

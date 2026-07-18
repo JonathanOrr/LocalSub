@@ -1,7 +1,17 @@
+import select
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
+
+from pipeline.errors import JobCancelled
+
+# How often should_cancel() gets polled while a subprocess is otherwise silent - see
+# _run_streamed. whisper-cli in particular can go silent for several seconds at a time
+# (model load, then however long a single chunk takes to decode) with zero output lines in
+# between, so checking cancellation only between lines isn't actually responsive - it would
+# only take effect whenever the next line happens to arrive, which could be a long wait.
+CANCEL_POLL_S = 0.3
 
 # repo root (parent of this pipeline/ package) - whisper.cpp/ lives alongside localsub.py
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -165,21 +175,47 @@ def check_dependencies(model: str, use_vad: bool, vad_engine: str) -> tuple[Path
     return model_path, vad_model_path
 
 
-def _run_streamed(cmd: list[str], log_fn: Callable[[str], None]) -> None:
+def _run_streamed(
+    cmd: list[str], log_fn: Callable[[str], None], should_cancel: Callable[[], bool] = lambda: False,
+) -> None:
     """Run cmd, forwarding its stdout/stderr line-by-line to log_fn as it runs (instead of
     subprocess.run's default of just inheriting the parent's stdio) - needed so a caller
     like the web UI can capture live progress instead of it going straight to a terminal
     the caller doesn't own. Raises subprocess.CalledProcessError on nonzero exit, matching
-    subprocess.run(..., check=True)."""
+    subprocess.run(..., check=True). should_cancel is polled on a fixed timer (CANCEL_POLL_S)
+    via select(), not just between output lines - whisper-cli in particular can run silent
+    for several real seconds (model load, then however long one chunk takes to decode), and
+    checking only between lines would leave a cancel request sitting unnoticed for that whole
+    stretch. On a hit, the process is killed outright and JobCancelled is raised, giving the
+    web UI's Cancel button a genuinely prompt effect regardless of the subprocess's own
+    output cadence."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    for line in proc.stdout:
-        log_fn(line.rstrip("\n"))
+    assert proc.stdout is not None  # guaranteed by stdout=subprocess.PIPE above
+    stdout = proc.stdout
+    while True:
+        if should_cancel():
+            proc.kill()
+            proc.wait()
+            raise JobCancelled("cancelled by user")
+        ready, _, _ = select.select([stdout], [], [], CANCEL_POLL_S)
+        if ready:
+            line = stdout.readline()
+            if line == "":
+                break  # EOF - the process is finishing up
+            log_fn(line.rstrip("\n"))
+        elif proc.poll() is not None:
+            break  # exited with nothing left to read
     proc.wait()
+    if should_cancel():
+        raise JobCancelled("cancelled by user")
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
-def extract_audio(video_path: Path, workdir: Path, log_fn: Callable[[str], None] = print) -> Path:
+def extract_audio(
+    video_path: Path, workdir: Path, log_fn: Callable[[str], None] = print,
+    should_cancel: Callable[[], bool] = lambda: False,
+) -> Path:
     wav_path = workdir / f"{video_path.stem}.wav"
     log_fn(f"[1/4] Extracting audio -> {wav_path}")
     _run_streamed(
@@ -187,7 +223,7 @@ def extract_audio(video_path: Path, workdir: Path, log_fn: Callable[[str], None]
             "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path),
         ],
-        log_fn,
+        log_fn, should_cancel,
     )
     return wav_path
 
@@ -198,6 +234,7 @@ def transcribe(
     vad_max_speech_s: float, entropy_thold: float, logprob_thold: float, no_speech_thold: float,
     max_context: int, vad_threshold: float, vad_min_speech_ms: int, vad_min_silence_ms: int,
     vad_speech_pad_ms: int, log_fn: Callable[[str], None] = print,
+    should_cancel: Callable[[], bool] = lambda: False,
 ) -> Path:
     cmd = [
         str(WHISPER_CLI), "-m", str(model_path), "-f", str(wav_path),
@@ -215,13 +252,14 @@ def transcribe(
             "-vt", str(vad_threshold), "-vspd", str(vad_min_speech_ms),
             "-vsd", str(vad_min_silence_ms), "-vp", str(vad_speech_pad_ms),
         ]
-    _run_streamed(cmd, log_fn)
+    _run_streamed(cmd, log_fn, should_cancel)
     return Path(f"{out_stem}.srt")
 
 
 def mux(
     video_path: Path, src_srt: Path, src_lang: str, target_srt: Path | None, target_lang: str,
     output_path: Path, log_fn: Callable[[str], None] = print,
+    should_cancel: Callable[[], bool] = lambda: False,
 ) -> None:
     log_fn(f"[mux] Muxing subtitles -> {output_path}")
     src_tag, src_title = language_info(src_lang)
@@ -238,4 +276,4 @@ def mux(
         target_tag, target_title = language_info(target_lang)
         cmd += ["-metadata:s:s:1", f"language={target_tag}", "-metadata:s:s:1", f"title={target_title}"]
     cmd.append(str(output_path))
-    _run_streamed(cmd, log_fn)
+    _run_streamed(cmd, log_fn, should_cancel)

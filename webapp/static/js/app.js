@@ -29,6 +29,7 @@ const AUDIO_EXTENSIONS = [".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opu
 
 const form = document.getElementById("runForm");
 const runBtn = document.getElementById("runBtn");
+const cancelBtn = document.getElementById("cancelBtn");
 const resetBtn = document.getElementById("resetBtn");
 const logEl = document.getElementById("log");
 const confirmArea = document.getElementById("confirmArea");
@@ -254,7 +255,16 @@ function errorStages() {
   renderStages();
 }
 
-const STAGE_ICON = { pending: "○", active: "◐", done: "●", skipped: "—", error: "✕" };
+// Distinct from errorStages() - cancellation isn't a failure, so the active stage gets its
+// own neutral styling (see .stage-cancelled) rather than the red used for a real error.
+function cancelStages() {
+  Object.keys(stageStates).forEach((id) => {
+    if (stageStates[id] === "active") stageStates[id] = "cancelled";
+  });
+  renderStages();
+}
+
+const STAGE_ICON = { pending: "○", active: "◐", done: "●", skipped: "—", error: "✕", cancelled: "⊘" };
 
 function renderStages() {
   stageListEl.innerHTML = PIPELINE_STAGES.map((s) => {
@@ -307,7 +317,15 @@ const STATUS_BADGE = {
   waiting_confirm: { cls: "bg-warning text-dark", text: "Waiting for input" },
   done: { cls: "bg-success", text: "Done" },
   error: { cls: "bg-danger", text: "Error" },
+  cancelled: { cls: "bg-secondary", text: "Cancelled" },
 };
+
+// Shared by every place a job transitions into or out of "actively running" - keeps
+// runBtn and cancelBtn in sync without duplicating the same two lines at each call site.
+function setJobActive(active) {
+  runBtn.disabled = active;
+  cancelBtn.style.display = active ? "inline-block" : "none";
+}
 
 function switchToJob(jobId) {
   fetch(`/api/jobs/${jobId}`)
@@ -320,7 +338,7 @@ function switchToJob(jobId) {
       appendLog(`[Connected to job ${jobId} - status: ${data.status}]`);
       connectToJob(jobId, data.config_flags);
       if (data.status === "done") showOutputPreview(data.result);
-      runBtn.disabled = data.status === "running" || data.status === "waiting_confirm";
+      setJobActive(data.status === "running" || data.status === "waiting_confirm");
     });
 }
 
@@ -388,6 +406,15 @@ function submitConfirm(response) {
   });
   hideConfirm();
 }
+
+// No optimistic UI update here - wait for the "cancelled" SSE event (handleJobEvent) to
+// actually update the checklist/buttons, consistent with how confirm submission works.
+// Cancellation is cooperative (see CONTRIBUTING.md / pipeline/errors.py): usually near-
+// instant, but if an LLM call is actively in flight it takes effect once that call returns.
+cancelBtn.addEventListener("click", () => {
+  if (!currentJobId) return;
+  fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" });
+});
 
 function showChangesConfirm(event) {
   confirmTitle.textContent = event.description;
@@ -632,7 +659,7 @@ function handleJobEvent(msg) {
     appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);
     if (event.target_srt) appendLog(`  Target subtitles (${event.target_lang}): ${event.target_srt}`);
     showOutputPreview(event);
-    runBtn.disabled = false;
+    setJobActive(false);
     if (currentEventSource) {
       currentEventSource.close();
       currentEventSource = null;
@@ -640,7 +667,15 @@ function handleJobEvent(msg) {
   } else if (event.type === "error") {
     errorStages();
     appendLog(`\n[ERROR] ${event.message}`);
-    runBtn.disabled = false;
+    setJobActive(false);
+    if (currentEventSource) {
+      currentEventSource.close();
+      currentEventSource = null;
+    }
+  } else if (event.type === "cancelled") {
+    cancelStages();
+    appendLog("\nCancelled by user.");
+    setJobActive(false);
     if (currentEventSource) {
       currentEventSource.close();
       currentEventSource = null;
@@ -650,7 +685,7 @@ function handleJobEvent(msg) {
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
-  runBtn.disabled = true;
+  setJobActive(true);
   logEl.replaceChildren();
   hideConfirm();
   hideOutputPreview();
@@ -696,7 +731,7 @@ window.addEventListener("DOMContentLoaded", () => {
       appendLog(`[Reconnected to job ${savedJobId} - status: ${data.status}]`);
       connectToJob(savedJobId, data.config_flags);
       if (data.status === "done") showOutputPreview(data.result);
-      runBtn.disabled = data.status === "running" || data.status === "waiting_confirm";
+      setJobActive(data.status === "running" || data.status === "waiting_confirm");
     });
 });
 

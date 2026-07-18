@@ -2,7 +2,9 @@ import re
 import sys
 import urllib.error
 from pathlib import Path
+from typing import Callable
 
+from pipeline.errors import JobCancelled
 from pipeline.llm_client import LLM_CHUNK_SIZE, call_llm, write_raw_log_entry
 from pipeline.srt_utils import notes_for_batch, parse_srt_cues
 
@@ -12,7 +14,7 @@ LLM_TRANSLATE_LINE_RE = re.compile(r"^\[(\d+)\]\s*(.*)$")
 def llm_translate(
     srt_path: Path, endpoint: str, model: str, src_lang_name: str, target_lang_name: str,
     raw_log_path: Path | None = None, review_notes: list[str] | None = None,
-    context_primer: str | None = None,
+    context_primer: str | None = None, should_cancel: Callable[[], bool] = lambda: False,
 ) -> list[tuple[str, str, str]]:
     """Translate cues to the target language via the local LLM, preserving each cue's original timestamp."""
     cues = parse_srt_cues(srt_path)
@@ -24,6 +26,8 @@ def llm_translate(
         f"{context_primer}\n" if context_primer else ""
     )
     for start in range(0, len(cues), LLM_CHUNK_SIZE):
+        if should_cancel():
+            raise JobCancelled("cancelled by user")
         batch = cues[start : start + LLM_CHUNK_SIZE]
         transcript_text = "\n".join(f"[{num}] {text}" for num, ts, text in batch)
         notes_section = ""

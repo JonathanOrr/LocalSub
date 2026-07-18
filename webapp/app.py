@@ -10,7 +10,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig
 from pipeline.vad_ten import detect_raw_speech_runs
 from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio
-from webapp.runner import JOBS, start_job, submit_confirm
+from webapp.runner import JOBS, cancel_job, start_job, submit_confirm
 
 app = Flask(__name__)
 
@@ -202,12 +202,12 @@ def job_events(job_id):
         try:
             for item in replay:
                 yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") in ("done", "error"):
+                if item.get("type") in ("done", "error", "cancelled"):
                     return
             while True:
                 item = q.get()
                 yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") in ("done", "error"):
+                if item.get("type") in ("done", "error", "cancelled"):
                     break
         finally:
             job.unsubscribe(q)
@@ -219,6 +219,12 @@ def job_events(job_id):
 def job_confirm(job_id):
     data = request.get_json(force=True)
     ok = submit_confirm(job_id, data)
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
+def job_cancel(job_id):
+    ok = cancel_job(job_id)
     return jsonify({"ok": ok})
 
 

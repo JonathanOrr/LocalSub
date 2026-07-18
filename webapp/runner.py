@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.changes import ProposedChange
+from pipeline.errors import JobCancelled
 from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig, run_pipeline
 from pipeline.transcript_review import validate_and_renumber
 
@@ -22,7 +23,7 @@ class Job:
     # checklist (which stages this particular run will even attempt) without resubmitting
     # the whole form - see webapp.app.job_status and app.js's initStages
     config_flags: dict[str, bool] = field(default_factory=dict)
-    status: str = "running"  # running | waiting_confirm | done | error
+    status: str = "running"  # running | waiting_confirm | done | error | cancelled
     current_stage: str | None = None
     # every event ever emitted, kept so a browser that (re)connects after the run has
     # already progressed can catch up - see subscribe()
@@ -32,6 +33,10 @@ class Job:
     pending_confirm: dict[str, Any] | None = None
     confirm_response: dict[str, Any] | None = None
     confirm_event: threading.Event = field(default_factory=threading.Event)
+    # set by cancel_job() - polled cooperatively by run_pipeline (should_cancel) and by
+    # _await_confirm below, since a job paused on a confirm step needs a way to be woken
+    # up by cancellation too, not just by an actual browser response.
+    cancel_event: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
     error: str | None = None
 
@@ -67,6 +72,8 @@ class Job:
                 replay.append({"type": "done", **(self.result or {})})
             elif self.status == "error":
                 replay.append({"type": "error", "message": self.error})
+            elif self.status == "cancelled":
+                replay.append({"type": "cancelled"})
             self.subscribers.append(q)
         return replay, q
 
@@ -96,9 +103,14 @@ def _await_confirm(job: Job, payload: dict) -> dict:
     job.status = "waiting_confirm"
     job.emit({"type": "confirm_request", **payload})
     job.confirm_event.wait()
+    job.pending_confirm = None
+    if job.cancel_event.is_set():
+        # cancel_job() also sets confirm_event to wake this exact wait - without this
+        # check, a cancel clicked while paused here would just look like an empty/
+        # default response and let the pipeline carry on as if nothing happened.
+        raise JobCancelled("cancelled by user")
     job.status = "running"
     response = job.confirm_response or {}
-    job.pending_confirm = None
     return response
 
 
@@ -209,6 +221,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 confirm_primer_frames_fn=make_web_confirm_primer_frames(job, video_path),
                 log_fn=job.log,
                 stage_fn=job.set_stage,
+                should_cancel=job.cancel_event.is_set,
             )
             job.result = {
                 "output_path": str(result.output_path) if result.output_path else None,
@@ -220,6 +233,11 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
             }
             job.status = "done"
             job.emit({"type": "done", **job.result})
+        except JobCancelled:
+            # its own branch, not folded into the generic error path below, so the browser
+            # can render this as a neutral outcome (you asked for this) rather than a failure
+            job.status = "cancelled"
+            job.emit({"type": "cancelled"})
         except BaseException as e:
             job.status = "error"
             job.error = str(e)
@@ -235,4 +253,18 @@ def submit_confirm(job_id: str, response: dict[str, Any]) -> bool:
         return False
     job.confirm_response = response
     job.confirm_event.set()
+    return True
+
+
+def cancel_job(job_id: str) -> bool:
+    """Ask a running (or confirm-paused) job to stop. Cooperative, not instant everywhere -
+    see pipeline/errors.py:JobCancelled and run_pipeline's should_cancel parameter for why:
+    whisper-cli/ffmpeg get killed outright and a confirm pause wakes immediately, but a
+    genuinely in-flight LLM HTTP call finishes on its own before the next checkpoint is
+    reached. Returns False if there's no job to cancel (missing, or already finished)."""
+    job = JOBS.get(job_id)
+    if job is None or job.status in ("done", "error", "cancelled"):
+        return False
+    job.cancel_event.set()
+    job.confirm_event.set()  # wakes a paused confirm step, if any; harmless no-op otherwise
     return True

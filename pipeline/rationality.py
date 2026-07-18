@@ -1,9 +1,10 @@
 import re
 import urllib.error
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from pipeline.changes import ProposedChange
+from pipeline.errors import JobCancelled
 from pipeline.llm_client import LLM_CHUNK_SIZE, call_llm, write_raw_log_entry
 from pipeline.srt_utils import srt_timestamp_range_to_seconds
 from pipeline.video_frames import extract_frames_b64, reference_frame_content_blocks
@@ -39,7 +40,7 @@ LLM_RATIONALITY_LINE_RE = re.compile(
 
 def llm_check_rationality(
     cues: list[tuple[str, str, str]], endpoint: str, model: str, raw_log_path: Path | None = None,
-    context_primer: str | None = None,
+    context_primer: str | None = None, should_cancel: Callable[[], bool] = lambda: False,
 ) -> list[RationalityFlag]:
     flags = []
     if raw_log_path is not None:
@@ -49,6 +50,8 @@ def llm_check_rationality(
         f"{context_primer}\n\n" if context_primer else ""
     )
     for start in range(0, len(cues), LLM_CHUNK_SIZE):
+        if should_cancel():
+            raise JobCancelled("cancelled by user")
         batch = cues[start : start + LLM_CHUNK_SIZE]
         transcript_text = "\n".join(f"[{num}] {text}" for num, ts, text in batch)
         sent_content = LLM_RATIONALITY_PROMPT + primer_section + transcript_text
@@ -110,6 +113,7 @@ def llm_vision_resolve(
     flags: list[RationalityFlag], cues: list[tuple[str, str, str]], video_path: Path,
     endpoint: str, model: str, raw_log_path: Path | None = None,
     context_primer: str | None = None, reference_frames: list[tuple[float, str]] | None = None,
+    should_cancel: Callable[[], bool] = lambda: False,
 ) -> list[ProposedChange]:
     """Only called for the RationalityFlags that asked for vision - pulls frames and lets
     the model confirm/improve its own text-only guess. Unlike the rationality-check and
@@ -132,6 +136,8 @@ def llm_vision_resolve(
 
     changes = []
     for f in flags:
+        if should_cancel():
+            raise JobCancelled("cancelled by user")
         lo, hi = int(f.first_cue), int(f.last_cue)
         if lo not in cue_by_num:
             continue
