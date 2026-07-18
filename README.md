@@ -53,32 +53,27 @@ flowchart TD
     B -->|"flagged snippets only"| C["Repeat resolution<br/><b>1 call, total</b>"]
     C --> D[Transcript after repeat fixes]
 
+    D -->|"FULL transcript text<br/>+ N sampled frames"| E["Context primer<br/><b>1 call, total</b>"]
+    E --> P[("Primer text<br/>(characters/setting/tone)")]
+
     D -->|"40 cues per call<br/>batches don't see each other"| F["Rationality check<br/><b>1 call per 40-cue batch</b>"]
+    P -.->|"prepended to every batch"| F
 
     F -->|"cues flagged<br/>NEEDS_VISION"| G["Vision follow-up<br/><b>1 call per flagged cue</b><br/>sees only: its own text guess<br/>+ frames at that timestamp"]
     F -->|"text-only decided fixes"| CC["Confirmed fixes<br/><i>you review/exclude before applying</i>"]
     G --> CC
 
+    CC --> N[("Confirmed-fix notes")]
     CC --> R[Transcript after rationality + vision fixes]
 
     R --> V{{"Transcript review<br/><i>human edit, no LLM</i><br/>skippable"}}
     V --> R2[Final transcript]
 
-    subgraph SG2[" "]
-        direction LR
-        N[("Confirmed-fix notes")] -.->|"only notes overlapping<br/>that batch's cue range"| H["Translation<br/><b>1 call per 40-cue batch</b>"]
-    end
-    CC --> N
-    R2 --> H
-
-    D -->|"FULL transcript text<br/>+ N sampled frames"| E["Context primer<br/><b>1 call, total</b>"]
-    E --> P[("Primer text<br/>(characters/setting/tone)")]
-    P -.->|"prepended to every batch"| F
+    R2 -->|"40 cues per call<br/>batches don't see each other"| H["Translation<br/><b>1 call per 40-cue batch</b>"]
     P -.->|"prepended to every batch"| H
+    N -.->|"only notes overlapping<br/>that batch's cue range"| H
 
     H --> Z[Translated .srt]
-
-    style SG2 fill:transparent,stroke:transparent
 ```
 
 | Stage | # of calls | Sees | Never sees |
