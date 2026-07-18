@@ -169,6 +169,7 @@ def run_pipeline(
     shutil.copy(src_srt, src_srt.with_suffix(".raw.srt"))
 
     final_notes: list[str] = []
+    confirmed2: list[ProposedChange] = []
     context_primer: str | None = None
     if not config.no_llm_check:
         # disabling vision means no images anywhere, including user-pinned reference frames
@@ -251,7 +252,23 @@ def run_pipeline(
 
     if not config.no_transcript_review:
         stage_fn("transcript_review")
+        before_review = {int(num): text for num, ts, text in parse_srt_cues(src_srt)}
         confirm_transcript_fn(src_srt, config.auto_confirm)
+        if final_notes:
+            # a note like "[12-12] garbled -> 'X' (reason)" asserts the rationality/vision
+            # pass's fix is the confirmed correct text - translation is told to trust that
+            # over a literal reading. If the human then hand-edited that same cue during
+            # transcript review, the note is now stale and actively wrong: it would tell the
+            # translator to prefer the old automated guess over what's actually sitting in
+            # the transcript it's about to read. Drop any note whose cue range overlaps a
+            # cue the human touched - the edit itself is the final word, no note needed.
+            after_review = {int(num): text for num, ts, text in parse_srt_cues(src_srt)}
+            touched = {num for num, text in after_review.items() if before_review.get(num) != text}
+            if touched:
+                final_notes = [
+                    f"[{c.first_cue}-{c.last_cue}] {c.summary}" for c in confirmed2
+                    if not (set(range(int(c.first_cue), int(c.last_cue) + 1)) & touched)
+                ]
 
     target_srt = None
     if not config.no_translate:
