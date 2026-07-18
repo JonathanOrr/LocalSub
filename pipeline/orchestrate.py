@@ -23,7 +23,7 @@ ConfirmPrimerFramesFn = Callable[[list[tuple[float, str]], bool], list[tuple[flo
 @dataclass
 class PipelineConfig:
     """One field per CLI flag (same names, same defaults) - the single place the pipeline's
-    configurable surface is defined. subtranslate.py builds one of these from argparse;
+    configurable surface is defined. localsub.py builds one of these from argparse;
     webapp/app.py builds one from the web form."""
     lang: str = "ja"
     model: str = "large-v3"
@@ -62,7 +62,7 @@ class PipelineConfig:
 
 def _normalize_reference_frames(raw: list) -> list[tuple[float, str]]:
     """Normalize PipelineConfig.reference_frames from whatever shape it arrived in: argparse
-    gives (float, str) tuples directly (see subtranslate.py's --reference-frame parser), the
+    gives (float, str) tuples directly (see localsub.py's --reference-frame parser), the
     web UI's JSON payload gives {"t": ..., "label": ...} dicts, since JSON has no tuple type."""
     result = []
     for item in raw:
@@ -104,7 +104,7 @@ def run_pipeline(
     """The full pipeline: extract audio -> (optional TEN VAD pre-pass) -> transcribe ->
     (optional) repeat-resolution -> primer-frame review -> context primer ->
     rationality+vision check -> (optional) human transcript review -> translate -> mux.
-    Shared by subtranslate.py's CLI and the web UI - the only things either caller
+    Shared by localsub.py's CLI and the web UI - the only things either caller
     customizes are how a proposed-changes/primer/transcript-edit/primer-frames
     confirmation is obtained (confirm_changes_fn/confirm_primer_fn/confirm_transcript_fn/
     confirm_primer_frames_fn - block on a terminal prompt for the CLI, wait on a browser

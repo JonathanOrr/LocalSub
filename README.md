@@ -1,4 +1,4 @@
-# subtranslate
+# LocalSub
 
 Transcribe and translate foreign-language videos entirely locally - no cloud APIs - and
 mux the result into an `.mkv` with selectable soft-subtitle tracks. Built on
@@ -130,30 +130,30 @@ entirely and only needs whisper.cpp.
 Basic transcription + English translation (whisper.cpp's own built-in translate):
 
 ```
-python3 subtranslate.py your_video.mp4 --lang ja
+python3 localsub.py your_video.mp4 --lang ja
 ```
 
 Translate into a different target language via the local LLM, with the full
 repeat/rationality/vision quality-check pipeline and a running context primer:
 
 ```
-python3 subtranslate.py your_video.mp4 --lang zh --engine llm --target-lang es
+python3 localsub.py your_video.mp4 --lang zh --engine llm --target-lang es
 ```
 
 Non-interactive/background run (accepts all LLM-proposed fixes without prompting):
 
 ```
-python3 subtranslate.py your_video.mp4 --lang ja --engine llm --auto-confirm
+python3 localsub.py your_video.mp4 --lang ja --engine llm --auto-confirm
 ```
 
 Use the alternate TEN VAD engine (trims silence and preserves sentence boundaries more
 precisely than whisper.cpp's built-in VAD - worth trying on fast back-to-back dialogue):
 
 ```
-python3 subtranslate.py your_video.mp4 --lang ja --vad --vad-engine ten
+python3 localsub.py your_video.mp4 --lang ja --vad --vad-engine ten
 ```
 
-Run `python3 subtranslate.py --help` for the full list of flags (whisper decoder
+Run `python3 localsub.py --help` for the full list of flags (whisper decoder
 thresholds, VAD tuning, LLM endpoint/model, chunk sizes, etc.) - most have detailed
 explanations of what they trade off inline in the help text.
 

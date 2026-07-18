@@ -3,14 +3,14 @@
 whisper.cpp/
 
 # Real test videos and their generated per-video output folders
-# (subtranslate.py writes outputs into a <video-stem>/ folder next to the input video,
+# (localsub.py writes outputs into a <video-stem>/ folder next to the input video,
 # e.g. test_jp2/ containing test_jp2.ja.srt, test_jp2.ja.llm_vision.md, etc. - those
 # logs embed base64 JPEG frames extracted straight from the source video, so this needs
 # to catch the whole output folder, not just specific file types.)
 test_*.mp4
 test_*/
 
-# subtranslate.py's generated outputs, wherever they end up
+# localsub.py's generated outputs, wherever they end up
 *.wav
 *.srt
 *.output.mkv

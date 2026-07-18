@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-# repo root (parent of this pipeline/ package) - whisper.cpp/ lives alongside subtranslate.py
+# repo root (parent of this pipeline/ package) - whisper.cpp/ lives alongside localsub.py
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 WHISPER_DIR = SCRIPT_DIR / "whisper.cpp"
 WHISPER_CLI = WHISPER_DIR / "build" / "bin" / "whisper-cli"

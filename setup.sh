@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup for subtranslate.py: clones + builds whisper.cpp, downloads the models
+# One-time setup for localsub.py: clones + builds whisper.cpp, downloads the models
 # it needs, and installs the optional TEN VAD engine. Safe to re-run - each step is
 # skipped if its output already exists.
 set -euo pipefail
@@ -69,8 +69,8 @@ echo ""
 echo "==> Setup complete."
 echo ""
 echo "One manual step remains: install LM Studio (https://lmstudio.ai), load a model, and"
-echo "start its local server (default: http://localhost:1234/v1) - subtranslate.py talks to"
+echo "start its local server (default: http://localhost:1234/v1) - localsub.py talks to"
 echo "it as an OpenAI-compatible API and does not bundle or install it itself."
 echo ""
-echo "Try it: python3 subtranslate.py your_video.mp4 --lang ja"
+echo "Try it: python3 localsub.py your_video.mp4 --lang ja"
 echo "Or the web UI: python3 webui.py"
