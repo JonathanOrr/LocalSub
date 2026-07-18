@@ -109,6 +109,59 @@ There's also an optional alternate VAD (voice-activity-detection) front end
 sentence boundaries more precisely than whisper.cpp's built-in Silero VAD - see
 `--vad-engine ten` below.
 
+## Hardware requirements
+
+This covers whisper.cpp itself (the only non-optional stage - everything below assumes
+`--no-llm-check --no-translate`/`--engine whisper`, i.e. no local LLM involved). The
+optional LLM quality-check/translation/vision pipeline runs through a separate local
+server (LM Studio or similar) and its requirements depend entirely on whatever model you
+load there - not covered here.
+
+- **GPU (optional, but recommended)**: `setup.sh` builds whisper.cpp with the Vulkan
+  backend, so any Vulkan-capable GPU works - AMD, Intel, or NVIDIA, not just CUDA cards.
+  Without a compatible GPU, pass `--no-gpu` (or it'll be used automatically if none is
+  found) to fall back to CPU decoding - see benchmarks below for the real difference this
+  makes.
+- **VRAM**: the default `large-v3` model is ~2.9GB on disk, a reasonable proxy for its
+  VRAM footprint - a few GB of headroom is enough. If your GPU can't fit it, use
+  `--no-gpu` or a smaller `--model` (whisper.cpp also offers `medium`, `small`, `base`,
+  `tiny` - smaller/faster but less accurate).
+- **Disk**: the `large-v3` model file itself (~2.9GB), plus whisper.cpp's own build
+  artifacts (a few hundred MB) and the small Silero VAD model (~1MB) if you use `--vad`.
+- **CPU**: any modern multi-core CPU works as a fallback (`--threads` controls how many
+  cores CPU decoding uses, default 12) - see benchmarks below for realistic throughput.
+- **RAM**: not a practical bottleneck on any modern machine - a few free GB comfortably
+  covers model loading and audio buffers.
+
+## Performance
+
+Real measurements, not estimates - transcription-only (`large-v3` model, no VAD, no LLM
+pipeline), timed directly against `pipeline/whisper_engine.py`'s `transcribe()` on the
+machine this was developed on:
+
+**Hardware**: AMD Ryzen 9 7900 (12-core/24-thread), AMD Radeon RX 9070 XT (Vulkan
+backend), 30GB RAM.
+
+| Video length | GPU (Vulkan) | CPU-only (`--no-gpu`, 12 threads) |
+|---|---|---|
+| 30s (Japanese) | - | 10.1s (~3.0x real-time) |
+| 60s (Japanese) | - | 16.3s (~3.7x real-time) |
+| 11m 40s (Japanese) | 14.2s (~49x real-time) | - |
+| 26m 20s (English) | 69.0s (~23x real-time) | - |
+
+Takeaways:
+- GPU decoding here was roughly an order of magnitude faster than CPU (~15-50x real-time
+  vs. ~3-4x) - the real-time factor isn't a fixed multiplier, it varies with content
+  (speech density, language, silence), not just duration, so treat the GPU numbers above
+  as a realistic range rather than a single rate to extrapolate from.
+- CPU-only is still comfortably faster than real-time on a modern desktop CPU, just not
+  by nearly as much - fine for occasional use, GPU is worth having for anything longer or
+  frequent.
+- None of this includes the optional LLM-based quality-check/vision/translation stages -
+  their cost depends entirely on the local LLM server and model you choose, and is
+  already discussed in call-count terms in the table further up (each stage is either a
+  small fixed number of calls or scales with cue count, not video length directly).
+
 ## Setup
 
 ```
