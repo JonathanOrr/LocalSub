@@ -1,3 +1,14 @@
+// Sections in this file, in order (see CONTRIBUTING.md for the bigger picture):
+//   1. Form / payload            - reading the form into a PipelineConfig-shaped JSON body
+//   2. Pipeline stage progress   - the checklist mirroring orchestrate.py's stage_fn(...) calls
+//   3. Post-run preview          - in-browser <video> playback with generated subtitle tracks
+//   4. Recent jobs               - the server-side job list, for reconnecting from any tab
+//   5. Confirm dialogs           - the 4 confirm_request renderers (changes/primer/transcript/primer_frames)
+//   6. Job connection (SSE)      - EventSource wiring, reconnect-on-load, form submit
+//   7. VAD visualization         - the settings-preview diagram + real-video analyze/click-to-play
+//   8. Reference-frame picker    - pinning labeled character-identity frames
+
+// ===== SECTION: Form / payload =====
 const BOOL_FIELDS = [
   "no_translate", "no_gpu", "vad", "no_llm_check", "no_llm_vision",
   "no_context_primer", "no_transcript_review", "auto_confirm",
@@ -137,6 +148,7 @@ function buildPayload() {
   return payload;
 }
 
+// ===== SECTION: Pipeline stage progress =====
 // --- Pipeline stage progress indicator ---
 // Mirrors the stage ids pipeline/orchestrate.py's run_pipeline calls stage_fn(...) with.
 // skipIf reads the same config flags buildPayload()/job_status's config_flags produce, so
@@ -201,6 +213,7 @@ function renderStages() {
   }).join("");
 }
 
+// ===== SECTION: Post-run preview =====
 // --- Post-run in-browser preview ---
 function showOutputPreview(result) {
   if (!result || !result.video_path) return;
@@ -230,6 +243,7 @@ function hideOutputPreview() {
   outputPreviewVideo.load();
 }
 
+// ===== SECTION: Recent jobs =====
 // --- Recent jobs (server-side job list - works for reconnecting from any tab/browser,
 // not just the one localStorage remembers) ---
 const STATUS_BADGE = {
@@ -281,6 +295,10 @@ function loadRecentJobs() {
 
 refreshJobsBtn.addEventListener("click", loadRecentJobs);
 
+// ===== SECTION: Confirm dialogs =====
+// Renders the 4 kinds of confirm_request event a job can emit (see
+// pipeline/orchestrate.py's confirm_*_fn parameters and webapp/runner.py's
+// make_web_confirm_* factories) and posts the browser's decision back via submitConfirm().
 function hideConfirm() {
   confirmArea.style.display = "none";
   confirmBody.innerHTML = "";
@@ -519,6 +537,7 @@ function showPrimerFramesConfirm(event) {
   notifyActionNeeded("Review the frames sampled for the context primer.");
 }
 
+// ===== SECTION: Job connection (SSE) =====
 // Shared by a fresh submit, a page-load reconnect, and switching in from the recent-jobs
 // list - all three just need to point the same event handling at a (possibly already
 // in-progress) job id. configFlags drives the stage checklist; pass what job_status
@@ -615,6 +634,7 @@ window.addEventListener("DOMContentLoaded", () => {
     });
 });
 
+// ===== SECTION: VAD visualization =====
 // --- VAD settings visualization ---
 // A fixed, synthetic "representative dialogue" timeline (seconds) - not real audio, just
 // something to run the actual merge/pad/split math against so the diagram reacts to
@@ -858,6 +878,7 @@ document.getElementById("vadViz").addEventListener("click", (e) => {
   });
 });
 
+// ===== SECTION: Reference-frame picker =====
 // --- Reference frames: pin labeled character-identity frames (e.g. a clear intro shot),
 // sent to both the context primer and every vision follow-up call (see
 // PipelineConfig.reference_frames / pipeline.video_frames.reference_frame_content_blocks) so

@@ -83,27 +83,37 @@ def _changes_to_dicts(changes: list[ProposedChange]) -> list[dict]:
     ]
 
 
+def _await_confirm(job: Job, payload: dict) -> dict:
+    """Shared by every make_web_confirm_* factory below: publish a confirm_request event
+    onto the job (for the browser's SSE stream to pick up) and block the pipeline's
+    background thread on a threading.Event until the browser POSTs its decision to
+    /api/jobs/<id>/confirm (see submit_confirm), returning that decision. Each caller
+    still owns its own auto_confirm short-circuit and its own interpretation of the
+    response - this only covers the wait-for-browser mechanics that are otherwise
+    identical across confirm kinds."""
+    job.confirm_event.clear()
+    job.pending_confirm = payload
+    job.status = "waiting_confirm"
+    job.emit({"type": "confirm_request", **payload})
+    job.confirm_event.wait()
+    job.status = "running"
+    response = job.confirm_response or {}
+    job.pending_confirm = None
+    return response
+
+
 def make_web_confirm_changes(job: Job):
     """Drop-in replacement for pipeline.changes.confirm_changes: same signature, but
-    instead of blocking on a terminal input(), it publishes the proposed changes onto the
-    job (for the browser's SSE stream to pick up) and blocks on a threading.Event until the
-    browser POSTs its decision to /api/jobs/<id>/confirm."""
+    instead of blocking on a terminal input(), it pauses on _await_confirm."""
     def web_confirm_changes(description: str, changes: list[ProposedChange], auto_confirm: bool) -> list[ProposedChange]:
         if not changes:
             return []
         if auto_confirm:
             job.log(f"{description} (auto-confirm: applying all)")
             return changes
-        job.confirm_event.clear()
-        job.pending_confirm = {
+        response = _await_confirm(job, {
             "kind": "changes", "description": description, "changes": _changes_to_dicts(changes),
-        }
-        job.status = "waiting_confirm"
-        job.emit({"type": "confirm_request", **job.pending_confirm})
-        job.confirm_event.wait()
-        job.status = "running"
-        response = job.confirm_response or {}
-        job.pending_confirm = None
+        })
         selected = set(response.get("selected", range(len(changes))))
         return [c for i, c in enumerate(changes) if i in selected]
     return web_confirm_changes
@@ -116,14 +126,7 @@ def make_web_confirm_primer(job: Job):
         if auto_confirm:
             job.log("Context primer generated (auto-confirm: using as-is)")
             return primer
-        job.confirm_event.clear()
-        job.pending_confirm = {"kind": "primer", "primer": primer}
-        job.status = "waiting_confirm"
-        job.emit({"type": "confirm_request", **job.pending_confirm})
-        job.confirm_event.wait()
-        job.status = "running"
-        response = job.confirm_response or {}
-        job.pending_confirm = None
+        response = _await_confirm(job, {"kind": "primer", "primer": primer})
         if response.get("action") == "skip":
             return None
         text = (response.get("text") or "").strip()
@@ -140,14 +143,7 @@ def make_web_confirm_transcript(job: Job):
         if auto_confirm:
             return
         original = srt_path.read_text(encoding="utf-8")
-        job.confirm_event.clear()
-        job.pending_confirm = {"kind": "transcript", "transcript": original}
-        job.status = "waiting_confirm"
-        job.emit({"type": "confirm_request", **job.pending_confirm})
-        job.confirm_event.wait()
-        job.status = "running"
-        response = job.confirm_response or {}
-        job.pending_confirm = None
+        response = _await_confirm(job, {"kind": "transcript", "transcript": original})
         edited = response.get("text")
         if edited is None or edited == original:
             return
@@ -171,17 +167,10 @@ def make_web_confirm_primer_frames(job: Job, video_path: Path):
     ) -> list[tuple[float, str]]:
         if auto_confirm or not frames:
             return frames
-        job.confirm_event.clear()
-        job.pending_confirm = {
+        response = _await_confirm(job, {
             "kind": "primer_frames", "video_path": str(video_path),
             "frames": [{"t": t, "label": label} for t, label in frames],
-        }
-        job.status = "waiting_confirm"
-        job.emit({"type": "confirm_request", **job.pending_confirm})
-        job.confirm_event.wait()
-        job.status = "running"
-        response = job.confirm_response or {}
-        job.pending_confirm = None
+        })
         edited = response.get("frames", [])
         return [(float(f["t"]), str(f.get("label", "")).strip()) for f in edited]
     return web_confirm_primer_frames
