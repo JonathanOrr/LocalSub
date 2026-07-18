@@ -24,6 +24,7 @@
     .stage-skipped { color: #adb5bd; text-decoration: line-through; }
     .stage-error { border-color: #dc3545; color: #dc3545; font-weight: 600; background: #fdecec; }
     #outputPreviewArea { display: none; }
+    .section-disabled { opacity: 0.5; pointer-events: none; }
   </style>
 </head>
 <body class="bg-light">
@@ -40,10 +41,16 @@
 
   <form id="runForm" class="row g-3">
     <div class="col-12">
-      <label class="form-label">Video file path</label>
+      <label class="form-label">Video or audio file path</label>
       <div class="input-group">
-        <input type="text" class="form-control" name="video_path" id="videoPathInput" placeholder="/path/to/video.mp4" required>
+        <input type="text" class="form-control" name="video_path" id="videoPathInput" placeholder="/path/to/video.mp4 (or an audio file - mp3/wav/m4a/etc.)" required>
         <button class="btn btn-outline-secondary" type="button" id="browseBtn">Browse...</button>
+      </div>
+      <div id="audioOnlyNote" class="form-text" style="display:none">
+        Audio-only input detected - there's no video to pull frames from, so vision follow-up,
+        the context primer's sampled frames, and reference frames are all skipped
+        automatically (same as checking "Disable vision" below). No muxed output either -
+        the generated subtitle file(s) are the final result.
       </div>
     </div>
 
@@ -178,9 +185,9 @@
                 How these settings would reshape a representative stretch of fast
                 back-and-forth dialogue (a short interjection, two close sentences, a longer
                 pause, and one long unbroken monologue) - not your actual audio, unless you
-                analyze your real video below, in which case click a segment to hear it.
+                analyze your real file below, in which case click a segment to hear it.
               </p>
-              <button type="button" class="btn btn-sm btn-outline-primary" id="vadAnalyzeBtn">Analyze this video (real VAD)</button>
+              <button type="button" class="btn btn-sm btn-outline-primary" id="vadAnalyzeBtn">Analyze this file (real VAD)</button>
               <span id="vadAnalyzeStatus" class="text-muted small ms-2"></span>
               <div id="vadViz" class="mt-2"></div>
               <p id="vadVizNote" class="text-muted small mt-1 mb-0"></p>
@@ -248,32 +255,38 @@
                 follow-up call, so the LLM has an actual face to match against instead of
                 only a prose guess at who's who. No effect if vision is disabled above.
               </p>
-              <div class="d-flex align-items-center gap-2 mb-2">
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="refFrameLoadVideoBtn">Load video</button>
-                <span id="refFrameVideoStatus" class="text-muted small"></span>
-              </div>
-              <video id="refFrameVideo" controls style="display:none; max-width: 100%; max-height: 220px; background: #000;"></video>
-              <div id="refFrameCaptureRow" style="display:none" class="mt-2">
-                <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameCaptureBtn">Capture frame at current position</button>
-              </div>
-              <p class="text-muted small mt-2 mb-1">
-                Or enter a timestamp by hand (needed if the video above won't play in the
-                browser - not every source format is browser-playable):
+              <p id="refFrameAudioNote" class="text-muted small fst-italic" style="display:none">
+                Audio-only input - there's no video to pull frames from, so pinning reference
+                frames below would have no effect (vision is disabled automatically above).
               </p>
-              <div class="d-flex align-items-end gap-2 flex-wrap">
-                <div>
-                  <label class="form-label small mb-0">Timestamp (s)</label>
-                  <input type="number" step="0.1" min="0" class="form-control form-control-sm" id="refFrameTime" style="width: 8rem">
+              <div id="refFrameAddControls">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="refFrameLoadVideoBtn">Load video</button>
+                  <span id="refFrameVideoStatus" class="text-muted small"></span>
                 </div>
-                <div>
-                  <label class="form-label small mb-0">Label (e.g. character name)</label>
-                  <input type="text" class="form-control form-control-sm" id="refFrameLabel" style="width: 12rem">
+                <video id="refFrameVideo" controls style="display:none; max-width: 100%; max-height: 220px; background: #000;"></video>
+                <div id="refFrameCaptureRow" style="display:none" class="mt-2">
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameCaptureBtn">Capture frame at current position</button>
                 </div>
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="refFramePreviewBtn">Preview</button>
-                <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameAddBtn" disabled>Add</button>
-                <span id="refFrameStatus" class="text-muted small"></span>
+                <p class="text-muted small mt-2 mb-1">
+                  Or enter a timestamp by hand (needed if the video above won't play in the
+                  browser - not every source format is browser-playable):
+                </p>
+                <div class="d-flex align-items-end gap-2 flex-wrap">
+                  <div>
+                    <label class="form-label small mb-0">Timestamp (s)</label>
+                    <input type="number" step="0.1" min="0" class="form-control form-control-sm" id="refFrameTime" style="width: 8rem">
+                  </div>
+                  <div>
+                    <label class="form-label small mb-0">Label (e.g. character name)</label>
+                    <input type="text" class="form-control form-control-sm" id="refFrameLabel" style="width: 12rem">
+                  </div>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="refFramePreviewBtn">Preview</button>
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameAddBtn" disabled>Add</button>
+                  <span id="refFrameStatus" class="text-muted small"></span>
+                </div>
+                <img id="refFramePreviewImg" class="mt-2 rounded border" style="display:none; max-height: 160px;">
               </div>
-              <img id="refFramePreviewImg" class="mt-2 rounded border" style="display:none; max-height: 160px;">
               <div id="refFrameList" class="d-flex flex-wrap gap-2 mt-2"></div>
             </div>
           </div>
@@ -308,11 +321,7 @@
 
   <div id="outputPreviewArea" class="mt-4">
     <h5>Preview</h5>
-    <p class="text-muted small mb-1">
-      Plays the source video with the generated subtitles as selectable tracks (use the
-      player's CC/subtitles button) - not every source format is browser-playable, the
-      same caveat as the reference-frame picker above.
-    </p>
+    <p id="outputPreviewDesc" class="text-muted small mb-1"></p>
     <video id="outputPreviewVideo" controls style="max-width: 100%; max-height: 420px; background: #000;">
       <track id="outputPreviewSrcTrack" kind="subtitles">
       <track id="outputPreviewTgtTrack" kind="subtitles">
@@ -324,7 +333,7 @@
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Choose a video file</h5>
+        <h5 class="modal-title">Choose a video or audio file</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">

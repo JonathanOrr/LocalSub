@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
-from pipeline.orchestrate import PipelineConfig
+from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig
 from pipeline.vad_ten import detect_raw_speech_runs
 from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio
 from webapp.runner import JOBS, start_job, submit_confirm
@@ -15,6 +15,10 @@ from webapp.runner import JOBS, start_job, submit_confirm
 app = Flask(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".ts", ".mpg", ".mpeg"}
+# Audio-only input is a valid pipeline input too (see pipeline.orchestrate.AUDIO_EXTENSIONS
+# and run_pipeline's is_audio_only check) - it just skips the final mux step, since there's
+# no video to mux subtitles into. Combined here so the file browser lists both.
+BROWSABLE_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
 
 @app.route("/")
@@ -40,8 +44,9 @@ def browse():
         for entry in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
             if entry.is_dir():
                 entries.append({"name": entry.name, "path": str(entry), "is_dir": True})
-            elif entry.suffix.lower() in VIDEO_EXTENSIONS:
-                entries.append({"name": entry.name, "path": str(entry), "is_dir": False})
+            elif entry.suffix.lower() in BROWSABLE_EXTENSIONS:
+                is_audio = entry.suffix.lower() in AUDIO_EXTENSIONS
+                entries.append({"name": entry.name, "path": str(entry), "is_dir": False, "is_audio": is_audio})
     except OSError as e:
         return jsonify({"error": str(e)}), 400
     parent = str(path.parent) if path.parent != path else None
@@ -166,7 +171,11 @@ def create_job():
     config = PipelineConfig(**config_kwargs)
 
     job_id = start_job(video_path, config)
-    return jsonify({"job_id": job_id})
+    # config_flags here is server-computed (e.g. audio-only input forces no_llm_vision
+    # regardless of the checkbox - see start_job) - the frontend must use this rather
+    # than its own submitted payload to drive the stage checklist, or a flag that only
+    # gets corrected server-side never reaches the UI for a freshly-submitted run.
+    return jsonify({"job_id": job_id, "config_flags": JOBS[job_id].config_flags})
 
 
 @app.route("/api/jobs")

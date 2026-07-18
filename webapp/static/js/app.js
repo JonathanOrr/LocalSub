@@ -23,6 +23,9 @@ const FLOAT_FIELDS = [
 const STR_FIELDS = [
   "lang", "target_lang", "engine", "model", "vad_engine", "llm_endpoint", "llm_model",
 ];
+// Mirrors pipeline/orchestrate.py's AUDIO_EXTENSIONS - keep in sync by hand (same caveat
+// as PIPELINE_STAGES below, see CONTRIBUTING.md).
+const AUDIO_EXTENSIONS = [".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wma"];
 
 const form = document.getElementById("runForm");
 const runBtn = document.getElementById("runBtn");
@@ -31,6 +34,10 @@ const logEl = document.getElementById("log");
 const confirmArea = document.getElementById("confirmArea");
 const confirmTitle = document.getElementById("confirmTitle");
 const videoPathInput = document.getElementById("videoPathInput");
+const audioOnlyNote = document.getElementById("audioOnlyNote");
+const noLlmVisionCheckbox = document.getElementById("no_llm_vision");
+const refFrameAddControls = document.getElementById("refFrameAddControls");
+const refFrameAudioNote = document.getElementById("refFrameAudioNote");
 const browseModalEl = document.getElementById("browseModal");
 const browseModal = new bootstrap.Modal(browseModalEl);
 const browsePath = document.getElementById("browsePath");
@@ -39,6 +46,7 @@ const stageListEl = document.getElementById("stageList");
 const recentJobsList = document.getElementById("recentJobsList");
 const refreshJobsBtn = document.getElementById("refreshJobsBtn");
 const outputPreviewArea = document.getElementById("outputPreviewArea");
+const outputPreviewDesc = document.getElementById("outputPreviewDesc");
 const outputPreviewVideo = document.getElementById("outputPreviewVideo");
 const outputPreviewSrcTrack = document.getElementById("outputPreviewSrcTrack");
 const outputPreviewTgtTrack = document.getElementById("outputPreviewTgtTrack");
@@ -70,13 +78,14 @@ function loadBrowse(path) {
         const item = document.createElement("a");
         item.href = "#";
         item.className = "list-group-item list-group-item-action";
-        item.textContent = (entry.is_dir ? "📁 " : "🎬 ") + entry.name;
+        item.textContent = (entry.is_dir ? "📁 " : entry.is_audio ? "🎵 " : "🎬 ") + entry.name;
         item.onclick = (e) => {
           e.preventDefault();
           if (entry.is_dir) {
             loadBrowse(entry.path);
           } else {
             videoPathInput.value = entry.path;
+            updateAudioOnlyNote();
             browseModal.hide();
           }
         };
@@ -94,6 +103,7 @@ resetBtn.addEventListener("click", () => {
   form.reset();
   clearRefFramePicker();
   renderVadViz();
+  updateAudioOnlyNote();
 });
 
 // Per-section "Reset section" buttons: form.reset() only resets the whole form, so reset
@@ -118,7 +128,10 @@ document.querySelectorAll(".section-reset-btn").forEach((btn) => {
     const target = document.getElementById(btn.dataset.resetTarget);
     resetFieldsIn(target);
     if (btn.dataset.resetTarget === "panelVad") renderVadViz();
-    if (btn.dataset.resetTarget === "panelLlm") clearRefFramePicker();
+    if (btn.dataset.resetTarget === "panelLlm") {
+      clearRefFramePicker();
+      updateAudioOnlyNote(); // re-force "Disable vision" if audio-only input is still active
+    }
   });
 });
 const confirmBody = document.getElementById("confirmBody");
@@ -135,6 +148,43 @@ function appendLog(line) {
   div.textContent = line;
   logEl.appendChild(div);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function isAudioPath(path) {
+  const lower = path.trim().toLowerCase();
+  return AUDIO_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// Remembers whatever the user had "Disable vision" set to before audio-only input forced
+// it on, so switching back to a video path restores their actual preference instead of
+// silently leaving it checked.
+let noLlmVisionUserValue = null;
+
+// Reflects pipeline/orchestrate.py's is_audio_only-forces-no_llm_vision behavior (and the
+// fact that audio input skips the final mux) directly in the form, rather than letting
+// someone discover it only after a run - see webapp/runner.py's start_job for the
+// matching server-side config_flags override that also keeps the stage checklist honest.
+// The checkbox itself gets forced checked + disabled too - there's no real choice to make
+// once there's no video to pull frames from, so let the control say that outright.
+function updateAudioOnlyNote() {
+  const isAudio = isAudioPath(videoPathInput.value);
+  audioOnlyNote.style.display = isAudio ? "block" : "none";
+  if (isAudio) {
+    if (!noLlmVisionCheckbox.disabled) noLlmVisionUserValue = noLlmVisionCheckbox.checked;
+    noLlmVisionCheckbox.checked = true;
+    noLlmVisionCheckbox.disabled = true;
+    noLlmVisionCheckbox.title = "Forced on for audio-only input - there's no video to pull frames from.";
+  } else if (noLlmVisionCheckbox.disabled) {
+    noLlmVisionCheckbox.checked = noLlmVisionUserValue === null ? false : noLlmVisionUserValue;
+    noLlmVisionCheckbox.disabled = false;
+    noLlmVisionCheckbox.title = "";
+  }
+  // Pinning reference frames has no effect once vision is off - grey out the "add a new
+  // one" controls rather than leaving them fully interactive for something that gets
+  // silently discarded server-side. Already-pinned frames (refFrameList, not part of this
+  // wrapper) stay removable either way - clearing stale ones is still a reasonable action.
+  refFrameAddControls.classList.toggle("section-disabled", isAudio);
+  refFrameAudioNote.style.display = isAudio ? "block" : "none";
 }
 
 function buildPayload() {
@@ -164,7 +214,7 @@ const PIPELINE_STAGES = [
   { id: "vision", label: "Vision follow-up", skipIf: (c) => c.no_llm_check || c.no_llm_vision },
   { id: "transcript_review", label: "Transcript review", skipIf: (c) => c.no_transcript_review },
   { id: "translate", label: "Translate", skipIf: (c) => c.no_translate },
-  { id: "mux", label: "Mux output" },
+  { id: "mux", label: "Mux output", skipIf: (c) => c.is_audio_only },
 ];
 let stageStates = {};
 
@@ -218,6 +268,12 @@ function renderStages() {
 function showOutputPreview(result) {
   if (!result || !result.video_path) return;
   outputPreviewVideo.src = `/api/video?path=${encodeURIComponent(result.video_path)}`;
+  outputPreviewDesc.textContent = isAudioPath(result.video_path)
+    ? "Plays the source audio with the generated subtitles as selectable tracks (use the "
+      + "player's CC/subtitles button) - there's no picture, just the player controls and captions."
+    : "Plays the source video with the generated subtitles as selectable tracks (use the "
+      + "player's CC/subtitles button) - not every source format is browser-playable, the "
+      + "same caveat as the reference-frame picker above.";
   if (result.src_srt) {
     outputPreviewSrcTrack.src = `/api/subtitle_vtt?path=${encodeURIComponent(result.src_srt)}`;
     outputPreviewSrcTrack.label = `Source (${result.lang})`;
@@ -568,7 +624,11 @@ function handleJobEvent(msg) {
     else if (event.kind === "primer_frames") showPrimerFramesConfirm(event);
   } else if (event.type === "done") {
     finishStages();
-    appendLog(`\nDone: ${event.output_path}`);
+    if (event.output_path) {
+      appendLog(`\nDone: ${event.output_path}`);
+    } else {
+      appendLog(`\nDone (audio-only input - no muxed file, subtitle files below):`);
+    }
     appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);
     if (event.target_srt) appendLog(`  Target subtitles (${event.target_lang}): ${event.target_srt}`);
     showOutputPreview(event);
@@ -598,6 +658,11 @@ form.addEventListener("submit", (e) => {
     Notification.requestPermission();
   }
   const payload = buildPayload();
+  // Optimistic first paint from the submitted form values, so the checklist isn't blank
+  // while the request is in flight - connectToJob() below re-initializes it from the
+  // server's response a moment later, which is the authoritative one (e.g. audio-only
+  // input forces vision off server-side regardless of what the checkbox said - see
+  // webapp/runner.py's start_job - so the client's own guess can be briefly wrong here).
   initStages(payload);
 
   fetch("/api/jobs", {
@@ -607,7 +672,7 @@ form.addEventListener("submit", (e) => {
   })
     .then((r) => r.json())
     .then((data) => {
-      connectToJob(data.job_id, payload);
+      connectToJob(data.job_id, data.config_flags);
       loadRecentJobs();
     });
 });
@@ -617,6 +682,7 @@ form.addEventListener("submit", (e) => {
 // server-side - the SSE stream replays its full log history plus current stage/confirm/
 // done/error state on (re)connect, see Job.subscribe() in webapp/runner.py.
 window.addEventListener("DOMContentLoaded", () => {
+  updateAudioOnlyNote(); // in case the browser restored a previously-typed value on load
   loadRecentJobs();
   const savedJobId = localStorage.getItem(JOB_STORAGE_KEY);
   if (!savedJobId) return;
@@ -746,7 +812,7 @@ function renderVadViz() {
     ...(usingReal ? { playStart: s, playEnd: e } : {}),
   }));
 
-  const rawLabel = usingReal ? "Detected speech (raw) - your video" : "Detected speech (raw) - synthetic example";
+  const rawLabel = usingReal ? "Detected speech (raw) - your file" : "Detected speech (raw) - synthetic example";
   const rows = [
     { label: rawLabel, boxes: rawBoxes, color: "#0d6efd" },
     { label: "Kept & padded segments (sent to whisper)", boxes: finalBoxes, color: "#198754" },
@@ -852,16 +918,17 @@ form.querySelector('[name="vad_threshold"]').addEventListener("change", () => {
   }
 });
 videoPathInput.addEventListener("input", () => {
+  updateAudioOnlyNote();
   if (realVadData && realVadData.videoPath !== videoPathInput.value.trim()) {
     realVadData = null;
-    vadAnalyzeStatus.textContent = "Video path changed - click Analyze again to refresh.";
+    vadAnalyzeStatus.textContent = "File path changed - click Analyze again to refresh.";
     renderVadViz();
   }
   if (refFrameLoadedPath !== null && refFrameLoadedPath !== videoPathInput.value.trim()) {
     refFrameLoadedPath = null;
     refFrameVideo.style.display = "none";
     refFrameCaptureRow.style.display = "none";
-    refFrameVideoStatus.textContent = "Video path changed - click Load video again to refresh.";
+    refFrameVideoStatus.textContent = "File path changed - click Load video again to refresh.";
   }
 });
 

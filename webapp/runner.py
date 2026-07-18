@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.changes import ProposedChange
-from pipeline.orchestrate import PipelineConfig, run_pipeline
+from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig, run_pipeline
 from pipeline.transcript_review import validate_and_renumber
 
 JOBS: dict[str, "Job"] = {}
@@ -178,12 +178,23 @@ def make_web_confirm_primer_frames(job: Job, video_path: Path):
 
 def start_job(video_path: Path, config: PipelineConfig) -> str:
     job_id = uuid.uuid4().hex[:12]
+    # Mirrors run_pipeline's own is_audio_only-forces-no_llm_vision logic (see
+    # pipeline/orchestrate.py) so the web UI's stage checklist shows "Vision follow-up"
+    # as skipped for audio input even if the "Disable vision" checkbox wasn't checked -
+    # vision is going to be skipped either way, the checklist should say so up front.
+    # is_audio_only is also exposed on its own so the checklist can mark "Mux output" as
+    # skipped too - run_pipeline never actually calls mux() for audio input (nothing to
+    # mux subtitles into), it just fires the same stage_fn("mux") either way so the CLI/
+    # web UI don't need special-cased skip handling in the pipeline itself.
+    is_audio_only = video_path.suffix.lower() in AUDIO_EXTENSIONS
     job = Job(
         id=job_id, video_path=str(video_path),
         config_flags={
             "no_llm_check": config.no_llm_check, "no_context_primer": config.no_context_primer,
-            "no_llm_vision": config.no_llm_vision, "no_transcript_review": config.no_transcript_review,
+            "no_llm_vision": config.no_llm_vision or is_audio_only,
+            "no_transcript_review": config.no_transcript_review,
             "no_translate": config.no_translate,
+            "is_audio_only": is_audio_only,
         },
     )
     JOBS[job_id] = job
@@ -200,7 +211,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 stage_fn=job.set_stage,
             )
             job.result = {
-                "output_path": str(result.output_path),
+                "output_path": str(result.output_path) if result.output_path else None,
                 "src_srt": str(result.src_srt),
                 "target_srt": str(result.target_srt) if result.target_srt else None,
                 "lang": result.lang,
