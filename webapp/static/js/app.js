@@ -24,6 +24,13 @@ const browseModalEl = document.getElementById("browseModal");
 const browseModal = new bootstrap.Modal(browseModalEl);
 const browsePath = document.getElementById("browsePath");
 const browseList = document.getElementById("browseList");
+const stageListEl = document.getElementById("stageList");
+const recentJobsList = document.getElementById("recentJobsList");
+const refreshJobsBtn = document.getElementById("refreshJobsBtn");
+const outputPreviewArea = document.getElementById("outputPreviewArea");
+const outputPreviewVideo = document.getElementById("outputPreviewVideo");
+const outputPreviewSrcTrack = document.getElementById("outputPreviewSrcTrack");
+const outputPreviewTgtTrack = document.getElementById("outputPreviewTgtTrack");
 
 function loadBrowse(path) {
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
@@ -107,9 +114,15 @@ const confirmBody = document.getElementById("confirmBody");
 const confirmButtons = document.getElementById("confirmButtons");
 
 let currentJobId = null;
+let currentEventSource = null;
+const JOB_STORAGE_KEY = "localsub_current_job_id";
 
 function appendLog(line) {
-  logEl.textContent += line + "\n";
+  const div = document.createElement("div");
+  if (/\[WARNING\]/.test(line)) div.className = "log-warning";
+  else if (/\[ERROR\]/i.test(line)) div.className = "log-error";
+  div.textContent = line;
+  logEl.appendChild(div);
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -124,11 +137,174 @@ function buildPayload() {
   return payload;
 }
 
+// --- Pipeline stage progress indicator ---
+// Mirrors the stage ids pipeline/orchestrate.py's run_pipeline calls stage_fn(...) with.
+// skipIf reads the same config flags buildPayload()/job_status's config_flags produce, so
+// the checklist can mark stages this particular run's config will never reach as "skipped"
+// up front instead of leaving them looking merely "not started yet" forever.
+const PIPELINE_STAGES = [
+  { id: "audio", label: "Extract audio" },
+  { id: "transcribe", label: "Transcribe" },
+  { id: "repeats", label: "Repeat-loop resolution", skipIf: (c) => c.no_llm_check },
+  { id: "primer_frames", label: "Primer-frame review", skipIf: (c) => c.no_llm_check || c.no_context_primer },
+  { id: "primer", label: "Context primer", skipIf: (c) => c.no_llm_check || c.no_context_primer },
+  { id: "rationality", label: "Rationality check", skipIf: (c) => c.no_llm_check },
+  { id: "vision", label: "Vision follow-up", skipIf: (c) => c.no_llm_check || c.no_llm_vision },
+  { id: "transcript_review", label: "Transcript review", skipIf: (c) => c.no_transcript_review },
+  { id: "translate", label: "Translate", skipIf: (c) => c.no_translate },
+  { id: "mux", label: "Mux output" },
+];
+let stageStates = {};
+
+function initStages(config) {
+  stageStates = {};
+  PIPELINE_STAGES.forEach((s) => {
+    stageStates[s.id] = s.skipIf && s.skipIf(config) ? "skipped" : "pending";
+  });
+  renderStages();
+}
+
+function setStage(name) {
+  let reachedActive = false;
+  for (const s of PIPELINE_STAGES) {
+    if (stageStates[s.id] === "skipped") continue;
+    if (s.id === name) {
+      stageStates[s.id] = "active";
+      reachedActive = true;
+    } else if (!reachedActive) {
+      stageStates[s.id] = "done";
+    }
+  }
+  renderStages();
+}
+
+function finishStages() {
+  Object.keys(stageStates).forEach((id) => {
+    if (stageStates[id] === "active") stageStates[id] = "done";
+  });
+  renderStages();
+}
+
+function errorStages() {
+  Object.keys(stageStates).forEach((id) => {
+    if (stageStates[id] === "active") stageStates[id] = "error";
+  });
+  renderStages();
+}
+
+const STAGE_ICON = { pending: "○", active: "◐", done: "●", skipped: "—", error: "✕" };
+
+function renderStages() {
+  stageListEl.innerHTML = PIPELINE_STAGES.map((s) => {
+    const state = stageStates[s.id] || "pending";
+    return `<span class="stage-badge stage-${state}">${STAGE_ICON[state]} ${s.label}</span>`;
+  }).join("");
+}
+
+// --- Post-run in-browser preview ---
+function showOutputPreview(result) {
+  if (!result || !result.video_path) return;
+  outputPreviewVideo.src = `/api/video?path=${encodeURIComponent(result.video_path)}`;
+  if (result.src_srt) {
+    outputPreviewSrcTrack.src = `/api/subtitle_vtt?path=${encodeURIComponent(result.src_srt)}`;
+    outputPreviewSrcTrack.label = `Source (${result.lang})`;
+    outputPreviewSrcTrack.default = !result.target_srt;
+  } else {
+    outputPreviewSrcTrack.removeAttribute("src");
+  }
+  if (result.target_srt) {
+    outputPreviewTgtTrack.src = `/api/subtitle_vtt?path=${encodeURIComponent(result.target_srt)}`;
+    outputPreviewTgtTrack.label = `Translated (${result.target_lang})`;
+    outputPreviewTgtTrack.default = true;
+  } else {
+    outputPreviewTgtTrack.removeAttribute("src");
+  }
+  outputPreviewArea.style.display = "block";
+}
+
+function hideOutputPreview() {
+  outputPreviewArea.style.display = "none";
+  outputPreviewVideo.removeAttribute("src");
+  outputPreviewSrcTrack.removeAttribute("src");
+  outputPreviewTgtTrack.removeAttribute("src");
+  outputPreviewVideo.load();
+}
+
+// --- Recent jobs (server-side job list - works for reconnecting from any tab/browser,
+// not just the one localStorage remembers) ---
+const STATUS_BADGE = {
+  running: { cls: "bg-primary", text: "Running" },
+  waiting_confirm: { cls: "bg-warning text-dark", text: "Waiting for input" },
+  done: { cls: "bg-success", text: "Done" },
+  error: { cls: "bg-danger", text: "Error" },
+};
+
+function switchToJob(jobId) {
+  fetch(`/api/jobs/${jobId}`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) return;
+      hideConfirm();
+      hideOutputPreview();
+      logEl.replaceChildren();
+      appendLog(`[Connected to job ${jobId} - status: ${data.status}]`);
+      connectToJob(jobId, data.config_flags);
+      if (data.status === "done") showOutputPreview(data.result);
+      runBtn.disabled = data.status === "running" || data.status === "waiting_confirm";
+    });
+}
+
+function loadRecentJobs() {
+  fetch("/api/jobs")
+    .then((r) => r.json())
+    .then((jobs) => {
+      recentJobsList.innerHTML = "";
+      if (!jobs.length) {
+        recentJobsList.innerHTML = '<div class="text-muted small">No jobs yet.</div>';
+        return;
+      }
+      jobs.forEach((j) => {
+        const a = document.createElement("a");
+        a.href = "#";
+        a.className = "list-group-item list-group-item-action d-flex justify-content-between align-items-center";
+        const name = j.video_path ? j.video_path.split("/").pop() : j.job_id;
+        const badge = STATUS_BADGE[j.status] || { cls: "bg-secondary", text: j.status };
+        a.innerHTML = `<span>${escapeHtml(name)}</span><span class="badge ${badge.cls}">${badge.text}</span>`;
+        a.onclick = (e) => {
+          e.preventDefault();
+          switchToJob(j.job_id);
+        };
+        recentJobsList.appendChild(a);
+      });
+    });
+}
+
+refreshJobsBtn.addEventListener("click", loadRecentJobs);
+
 function hideConfirm() {
   confirmArea.style.display = "none";
   confirmBody.innerHTML = "";
   confirmButtons.innerHTML = "";
+  document.title = "LocalSub";
 }
+
+// A job can pause on a confirm step for a while if you've tabbed away - scroll it into
+// view, flash the title, and (if permission was granted) fire a real OS notification so
+// it doesn't just sit there silently waiting on you.
+function notifyActionNeeded(message) {
+  confirmArea.style.display = "block";
+  confirmArea.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (document.hidden) {
+    document.title = "⚠ Action needed - LocalSub";
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification("LocalSub needs your input", { body: message });
+    }
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) document.title = "LocalSub";
+});
 
 function submitConfirm(response) {
   fetch(`/api/jobs/${currentJobId}/confirm`, {
@@ -162,7 +338,7 @@ function showChangesConfirm(event) {
     submitConfirm({ selected });
   };
   document.getElementById("rejectAll").onclick = () => submitConfirm({ selected: [] });
-  confirmArea.style.display = "block";
+  notifyActionNeeded(event.description);
 }
 
 function showPrimerConfirm(event) {
@@ -176,7 +352,7 @@ function showPrimerConfirm(event) {
     submitConfirm({ action: "use", text: document.getElementById("primerText").value });
   };
   document.getElementById("skipPrimer").onclick = () => submitConfirm({ action: "skip" });
-  confirmArea.style.display = "block";
+  notifyActionNeeded("Review the generated context primer.");
 }
 
 function escapeHtml(s) {
@@ -195,7 +371,7 @@ function showTranscriptConfirm(event) {
   document.getElementById("continueTranscript").onclick = () => {
     submitConfirm({ text: document.getElementById("transcriptText").value });
   };
-  confirmArea.style.display = "block";
+  notifyActionNeeded("Review the transcript before translation.");
 }
 
 function showPrimerFramesConfirm(event) {
@@ -340,45 +516,102 @@ function showPrimerFramesConfirm(event) {
   document.getElementById("continuePrimerFrames").onclick = () => {
     submitConfirm({ frames: working.map((f) => ({ t: f.t, label: f.label })) });
   };
-  confirmArea.style.display = "block";
+  notifyActionNeeded("Review the frames sampled for the context primer.");
+}
+
+// Shared by a fresh submit, a page-load reconnect, and switching in from the recent-jobs
+// list - all three just need to point the same event handling at a (possibly already
+// in-progress) job id. configFlags drives the stage checklist; pass what job_status
+// returned when reconnecting/switching, or the just-built payload for a fresh submit.
+function connectToJob(jobId, configFlags) {
+  if (currentEventSource) {
+    currentEventSource.close();
+    currentEventSource = null;
+  }
+  currentJobId = jobId;
+  localStorage.setItem(JOB_STORAGE_KEY, jobId);
+  if (configFlags) initStages(configFlags);
+  const es = new EventSource(`/api/jobs/${jobId}/events`);
+  es.onmessage = handleJobEvent;
+  currentEventSource = es;
+}
+
+function handleJobEvent(msg) {
+  const event = JSON.parse(msg.data);
+  if (event.type === "log") {
+    appendLog(event.line);
+  } else if (event.type === "stage") {
+    setStage(event.name);
+  } else if (event.type === "confirm_request") {
+    if (event.kind === "changes") showChangesConfirm(event);
+    else if (event.kind === "primer") showPrimerConfirm(event);
+    else if (event.kind === "transcript") showTranscriptConfirm(event);
+    else if (event.kind === "primer_frames") showPrimerFramesConfirm(event);
+  } else if (event.type === "done") {
+    finishStages();
+    appendLog(`\nDone: ${event.output_path}`);
+    appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);
+    if (event.target_srt) appendLog(`  Target subtitles (${event.target_lang}): ${event.target_srt}`);
+    showOutputPreview(event);
+    runBtn.disabled = false;
+    if (currentEventSource) {
+      currentEventSource.close();
+      currentEventSource = null;
+    }
+  } else if (event.type === "error") {
+    errorStages();
+    appendLog(`\n[ERROR] ${event.message}`);
+    runBtn.disabled = false;
+    if (currentEventSource) {
+      currentEventSource.close();
+      currentEventSource = null;
+    }
+  }
 }
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   runBtn.disabled = true;
-  logEl.textContent = "";
+  logEl.replaceChildren();
   hideConfirm();
+  hideOutputPreview();
+  if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    Notification.requestPermission();
+  }
+  const payload = buildPayload();
+  initStages(payload);
 
   fetch("/api/jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildPayload()),
+    body: JSON.stringify(payload),
   })
     .then((r) => r.json())
     .then((data) => {
-      currentJobId = data.job_id;
-      const es = new EventSource(`/api/jobs/${currentJobId}/events`);
-      es.onmessage = (msg) => {
-        const event = JSON.parse(msg.data);
-        if (event.type === "log") {
-          appendLog(event.line);
-        } else if (event.type === "confirm_request") {
-          if (event.kind === "changes") showChangesConfirm(event);
-          else if (event.kind === "primer") showPrimerConfirm(event);
-          else if (event.kind === "transcript") showTranscriptConfirm(event);
-          else if (event.kind === "primer_frames") showPrimerFramesConfirm(event);
-        } else if (event.type === "done") {
-          appendLog(`\nDone: ${event.output_path}`);
-          appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);
-          if (event.target_srt) appendLog(`  Target subtitles (${event.target_lang}): ${event.target_srt}`);
-          runBtn.disabled = false;
-          es.close();
-        } else if (event.type === "error") {
-          appendLog(`\n[ERROR] ${event.message}`);
-          runBtn.disabled = false;
-          es.close();
-        }
-      };
+      connectToJob(data.job_id, payload);
+      loadRecentJobs();
+    });
+});
+
+// Reconnect to whatever job this browser last touched, so refreshing the page (or the tab
+// crashing) mid-run doesn't strand you with no visibility into a job that's still going
+// server-side - the SSE stream replays its full log history plus current stage/confirm/
+// done/error state on (re)connect, see Job.subscribe() in webapp/runner.py.
+window.addEventListener("DOMContentLoaded", () => {
+  loadRecentJobs();
+  const savedJobId = localStorage.getItem(JOB_STORAGE_KEY);
+  if (!savedJobId) return;
+  fetch(`/api/jobs/${savedJobId}`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        localStorage.removeItem(JOB_STORAGE_KEY);
+        return;
+      }
+      appendLog(`[Reconnected to job ${savedJobId} - status: ${data.status}]`);
+      connectToJob(savedJobId, data.config_flags);
+      if (data.status === "done") showOutputPreview(data.result);
+      runBtn.disabled = data.status === "running" || data.status === "waiting_confirm";
     });
 });
 

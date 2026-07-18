@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,8 +16,19 @@ JOBS: dict[str, "Job"] = {}
 @dataclass
 class Job:
     id: str
+    video_path: str = ""
+    created_at: float = field(default_factory=time.time)
+    # a handful of config booleans a reconnecting browser needs to rebuild its stage
+    # checklist (which stages this particular run will even attempt) without resubmitting
+    # the whole form - see webapp.app.job_status and app.js's initStages
+    config_flags: dict[str, bool] = field(default_factory=dict)
     status: str = "running"  # running | waiting_confirm | done | error
-    events: queue.Queue = field(default_factory=queue.Queue)
+    current_stage: str | None = None
+    # every event ever emitted, kept so a browser that (re)connects after the run has
+    # already progressed can catch up - see subscribe()
+    history: list[dict[str, Any]] = field(default_factory=list)
+    subscribers: list[queue.Queue] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
     pending_confirm: dict[str, Any] | None = None
     confirm_response: dict[str, Any] | None = None
     confirm_event: threading.Event = field(default_factory=threading.Event)
@@ -24,10 +36,44 @@ class Job:
     error: str | None = None
 
     def log(self, line: str) -> None:
-        self.events.put({"type": "log", "line": line})
+        self.emit({"type": "log", "line": line})
+
+    def set_stage(self, name: str) -> None:
+        self.current_stage = name
+        self.emit({"type": "stage", "name": name})
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.events.put(event)
+        with self.lock:
+            self.history.append(event)
+            for q in self.subscribers:
+                q.put(event)
+
+    def subscribe(self) -> tuple[list[dict[str, Any]], queue.Queue]:
+        """Atomically snapshot the job's current state and register a live queue for
+        whatever happens next, so a browser connecting (or reconnecting after a page
+        refresh, or switching in from the recent-jobs list) never misses or double-sees an
+        event. Replaying the full "log" history is always safe (purely additive text), but
+        confirm/stage/done/error events represent *state*, not a log - replaying a stale one
+        (e.g. a confirm that's since been answered) would be actively wrong, so those are
+        synthesized fresh from the job's current fields instead of replayed verbatim."""
+        q: queue.Queue = queue.Queue()
+        with self.lock:
+            replay = [e for e in self.history if e.get("type") == "log"]
+            if self.current_stage is not None:
+                replay.append({"type": "stage", "name": self.current_stage})
+            if self.pending_confirm is not None:
+                replay.append({"type": "confirm_request", **self.pending_confirm})
+            elif self.status == "done":
+                replay.append({"type": "done", **(self.result or {})})
+            elif self.status == "error":
+                replay.append({"type": "error", "message": self.error})
+            self.subscribers.append(q)
+        return replay, q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self.lock:
+            if q in self.subscribers:
+                self.subscribers.remove(q)
 
 
 def _changes_to_dicts(changes: list[ProposedChange]) -> list[dict]:
@@ -143,7 +189,14 @@ def make_web_confirm_primer_frames(job: Job, video_path: Path):
 
 def start_job(video_path: Path, config: PipelineConfig) -> str:
     job_id = uuid.uuid4().hex[:12]
-    job = Job(id=job_id)
+    job = Job(
+        id=job_id, video_path=str(video_path),
+        config_flags={
+            "no_llm_check": config.no_llm_check, "no_context_primer": config.no_context_primer,
+            "no_llm_vision": config.no_llm_vision, "no_transcript_review": config.no_transcript_review,
+            "no_translate": config.no_translate,
+        },
+    )
     JOBS[job_id] = job
 
     def run() -> None:
@@ -155,6 +208,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 confirm_transcript_fn=make_web_confirm_transcript(job),
                 confirm_primer_frames_fn=make_web_confirm_primer_frames(job, video_path),
                 log_fn=job.log,
+                stage_fn=job.set_stage,
             )
             job.result = {
                 "output_path": str(result.output_path),
@@ -162,6 +216,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 "target_srt": str(result.target_srt) if result.target_srt else None,
                 "lang": result.lang,
                 "target_lang": result.target_lang,
+                "video_path": str(video_path),
             }
             job.status = "done"
             job.emit({"type": "done", **job.result})

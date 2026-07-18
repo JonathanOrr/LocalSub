@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -168,18 +169,39 @@ def create_job():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/jobs")
+def list_jobs():
+    """Recent jobs (running or finished), newest first - lets the web UI offer a way back
+    into a job from any browser/tab, not just the one that started it (see the "Recent
+    jobs" panel), since a job's real state lives here server-side, not in the browser."""
+    jobs = sorted(JOBS.values(), key=lambda j: j.created_at, reverse=True)
+    return jsonify([
+        {"job_id": j.id, "video_path": j.video_path, "status": j.status, "created_at": j.created_at}
+        for j in jobs[:20]
+    ])
+
+
 @app.route("/api/jobs/<job_id>/events")
 def job_events(job_id):
     job = JOBS.get(job_id)
     if job is None:
         return jsonify({"error": "unknown job"}), 404
 
+    replay, q = job.subscribe()
+
     def stream():
-        while True:
-            item = job.events.get()
-            yield f"data: {json.dumps(item)}\n\n"
-            if item.get("type") in ("done", "error"):
-                break
+        try:
+            for item in replay:
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    return
+            while True:
+                item = q.get()
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    break
+        finally:
+            job.unsubscribe(q)
 
     return Response(stream(), mimetype="text/event-stream")
 
@@ -196,4 +218,28 @@ def job_status(job_id):
     job = JOBS.get(job_id)
     if job is None:
         return jsonify({"error": "unknown job"}), 404
-    return jsonify({"status": job.status, "result": job.result, "error": job.error})
+    return jsonify({
+        "status": job.status, "result": job.result, "error": job.error,
+        "video_path": job.video_path, "config_flags": job.config_flags,
+    })
+
+
+SRT_TIMESTAMP_RE = re.compile(r"(\d{2}:\d{2}:\d{2}),(\d{3})")
+
+
+@app.route("/api/subtitle_vtt")
+def subtitle_vtt():
+    """Convert a generated .srt to WebVTT on the fly, for the post-run preview player.
+    Browsers don't expose embedded/soft subtitle tracks muxed into the output .mkv via the
+    native <video> element in any reliable cross-browser way, but they do support WebVTT via
+    an external <track> element - so the preview plays the *source* video (already served by
+    /api/video) with the generated subtitles attached as real, selectable text tracks
+    instead of hoping the browser's container demuxer surfaces the muxed-in ones. SRT and
+    VTT are otherwise close to identical - the only real difference here is the decimal
+    separator in timestamps (',' vs '.') and the required WEBVTT header line."""
+    raw_path = request.args.get("path", "")
+    srt_path = Path(raw_path)
+    if not srt_path.exists():
+        return jsonify({"error": f"subtitle file not found: {srt_path}"}), 400
+    vtt_text = "WEBVTT\n\n" + SRT_TIMESTAMP_RE.sub(r"\1.\2", srt_path.read_text(encoding="utf-8"))
+    return Response(vtt_text, mimetype="text/vtt")

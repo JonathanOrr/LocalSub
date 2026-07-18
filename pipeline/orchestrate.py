@@ -18,6 +18,7 @@ ConfirmChangesFn = Callable[[str, list[ProposedChange], bool], list[ProposedChan
 ConfirmPrimerFn = Callable[[str, bool], str | None]
 ConfirmTranscriptFn = Callable[[Path, bool], None]
 ConfirmPrimerFramesFn = Callable[[list[tuple[float, str]], bool], list[tuple[float, str]]]
+StageFn = Callable[[str], None]
 
 
 @dataclass
@@ -100,6 +101,7 @@ def run_pipeline(
     confirm_transcript_fn: ConfirmTranscriptFn = confirm_transcript,
     confirm_primer_frames_fn: ConfirmPrimerFramesFn = confirm_primer_frames,
     log_fn: Callable[[str], None] = print,
+    stage_fn: StageFn = lambda stage: None,
 ) -> PipelineResult:
     """The full pipeline: extract audio -> (optional TEN VAD pre-pass) -> transcribe ->
     (optional) repeat-resolution -> primer-frame review -> context primer ->
@@ -108,7 +110,12 @@ def run_pipeline(
     customizes are how a proposed-changes/primer/transcript-edit/primer-frames
     confirmation is obtained (confirm_changes_fn/confirm_primer_fn/confirm_transcript_fn/
     confirm_primer_frames_fn - block on a terminal prompt for the CLI, wait on a browser
-    click for the web UI) and where status lines go (log_fn)."""
+    click for the web UI), where status lines go (log_fn), and stage_fn, called with a
+    canonical stage id (e.g. "transcribe", "rationality") right as each stage starts - the
+    CLI ignores it (its log lines already narrate progress); the web UI uses it to drive a
+    structured progress indicator. A stage conditionally skipped by config (or, for
+    "vision", skipped because no cue happened to need it) just never fires its call - the
+    caller decides how to represent that rather than this function announcing skips."""
     if config.engine == "whisper" and config.target_lang != "en" and not config.no_translate:
         sys.exit(
             "whisper.cpp's built-in --translate only supports English as a target - "
@@ -128,6 +135,7 @@ def run_pipeline(
         config.model, use_vad=config.vad, vad_engine=config.vad_engine,
     )
 
+    stage_fn("audio")
     wav_path = extract_audio(video_path, out_dir, log_fn=log_fn)
 
     trim_map: list[tuple[float, float, float]] | None = None
@@ -144,6 +152,7 @@ def run_pipeline(
         else:
             log_fn("  [WARNING] TEN VAD found no speech segments - using the full audio unchanged")
 
+    stage_fn("transcribe")
     log_fn("[2/4] Transcribing (source language)")
     src_srt = transcribe(
         wav_path, model_path, config.lang, translate=False,
@@ -165,6 +174,7 @@ def run_pipeline(
         # disabling vision means no images anywhere, including user-pinned reference frames
         reference_frames = [] if config.no_llm_vision else _normalize_reference_frames(config.reference_frames)
 
+        stage_fn("repeats")
         repeats = detect_repeats(src_srt, config.flag_repeat_count)
         repeats += detect_char_repeats(parse_srt_cues(src_srt), config.flag_repeat_count)
         repeats.sort(key=lambda r: int(r.first_cue))
@@ -187,12 +197,14 @@ def run_pipeline(
             # included in what's sent to the primer, just not re-editable at this stage. A
             # frame labeled during this review (whether it started blank or was relabeled)
             # also becomes a reference frame for every later vision follow-up call.
+            stage_fn("primer_frames")
             primer_frame_count = 0 if config.no_llm_vision else config.context_primer_frames
             default_frames = default_primer_frame_plan(parse_srt_cues(src_srt), primer_frame_count)
             confirmed_default_frames = confirm_primer_frames_fn(default_frames, config.auto_confirm)
             primer_frames = confirmed_default_frames + reference_frames
             reference_frames = reference_frames + [(t, label) for t, label in confirmed_default_frames if label]
 
+            stage_fn("primer")
             log_fn("  Building context primer (characters/setting/tone) from the full transcript...")
             raw_primer = build_context_primer(
                 parse_srt_cues(src_srt), video_path, primer_frames, config.llm_endpoint, config.llm_model,
@@ -201,6 +213,7 @@ def run_pipeline(
             if raw_primer is not None:
                 context_primer = confirm_primer_fn(raw_primer, config.auto_confirm)
 
+        stage_fn("rationality")
         log_fn(f"  Running LLM rationality check ({config.llm_model})...")
         cues = parse_srt_cues(src_srt)
         flags = llm_check_rationality(
@@ -213,6 +226,7 @@ def run_pipeline(
 
         vision_changes = []
         if need_vision:
+            stage_fn("vision")
             log_fn(f"  Rationality check requested vision for {len(need_vision)} cue(s)...")
             vision_changes = llm_vision_resolve(
                 need_vision, cues, video_path, config.llm_endpoint, config.llm_model,
@@ -236,10 +250,12 @@ def run_pipeline(
         write_srt(apply_changes(parse_srt_cues(src_srt), confirmed2), src_srt)
 
     if not config.no_transcript_review:
+        stage_fn("transcript_review")
         confirm_transcript_fn(src_srt, config.auto_confirm)
 
     target_srt = None
     if not config.no_translate:
+        stage_fn("translate")
         _, target_lang_name = language_info(config.target_lang)
         log_fn(f"[3/4] Translating to {target_lang_name}")
         if config.engine == "llm":
@@ -266,6 +282,7 @@ def run_pipeline(
             if trim_map is not None:
                 remap_srt_timestamps(target_srt, trim_map)
 
+    stage_fn("mux")
     output_path = out_dir / f"{video_path.stem}.output.mkv"
     mux(video_path, src_srt, config.lang, target_srt, config.target_lang, output_path, log_fn=log_fn)
 
