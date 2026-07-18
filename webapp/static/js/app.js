@@ -232,7 +232,7 @@ const VAD_TIMELINE_END = 15.0;
 // diagram runs against the synthetic timeline above instead.
 let realVadData = null;
 
-function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS) {
+function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS, timelineEnd) {
   let merged = [rawRuns[0].slice()];
   for (let i = 1; i < rawRuns.length; i++) {
     const [start, end] = rawRuns[i];
@@ -248,7 +248,7 @@ function computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeech
   if (kept.length === 0) return { segments: [], droppedCount };
 
   const padS = padMs / 1000;
-  const padded = kept.map(([s, e]) => [Math.max(0, s - padS), Math.min(VAD_TIMELINE_END, e + padS)]);
+  const padded = kept.map(([s, e]) => [Math.max(0, s - padS), Math.min(timelineEnd, e + padS)]);
   let segments = [padded[0].slice()];
   for (let i = 1; i < padded.length; i++) {
     const [s, e] = padded[i];
@@ -305,9 +305,14 @@ function renderVadViz() {
   const rawRuns = usingReal ? realVadData.rawRuns : VAD_RAW_RUNS;
   const timelineEnd = usingReal ? realVadData.durationS : VAD_TIMELINE_END;
 
-  const { segments, droppedCount } = computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS);
+  const { segments, droppedCount } = computeVadSegments(rawRuns, minSpeechMs, minSilenceMs, padMs, maxSpeechS, timelineEnd);
 
-  const W = 800, x0 = 4, xw = W - 8;
+  // A fixed 800-unit-wide diagram squeezes a long video's many segments into slivers too
+  // thin to see or click. Instead, give the timeline a minimum pixel budget per second and
+  // let the container scroll horizontally (see #vadViz CSS) once that exceeds a normal
+  // panel width - short videos still render as one glance-able strip, long ones scroll.
+  const PX_PER_SEC = 15;
+  const W = Math.max(800, timelineEnd * PX_PER_SEC), x0 = 4, xw = W - 8;
   const scaleX = (t) => x0 + (timelineEnd > 0 ? (t / timelineEnd) * xw : 0);
 
   const rawBoxes = rawRuns.map(([s, e]) => ({
@@ -350,7 +355,7 @@ function renderVadViz() {
   // per-row spacing, so labels/boxes never crowd into the row above or below
   const ROW_H = 55;
   const H = ROW_H * rows.length + 15;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`;
   rows.forEach((row, i) => {
     const y = ROW_H * i + 40;
     svg += svgTimelineRow(y, row.label, x0, xw, row.boxes, row.color);
