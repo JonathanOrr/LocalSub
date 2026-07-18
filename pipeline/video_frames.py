@@ -1,7 +1,15 @@
 import base64
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# Cap the longer side of every LLM-bound frame. Vision encoders on local models typically
+# downsample/tile to a fixed native resolution well under 1080p/4K anyway, so sending frames
+# at their original video resolution mostly just inflates base64 payload size and vision-token
+# count (more tiles to encode) without adding anything the model can actually use - this is a
+# ceiling, not a target, so frames already smaller than it pass through unscaled.
+LLM_FRAME_MAX_DIM = 1024
 
 
 def extract_frame_at_b64(video_path: Path, t: float) -> str | None:
@@ -13,7 +21,9 @@ def extract_frame_at_b64(video_path: Path, t: float) -> str | None:
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-v", "error", "-ss", f"{max(t, 0.0):.3f}", "-i", str(video_path),
-                "-frames:v", "1", "-q:v", "3", str(tmp_path),
+                "-frames:v", "1", "-vf",
+                f"scale='min({LLM_FRAME_MAX_DIM},iw)':'min({LLM_FRAME_MAX_DIM},ih)':force_original_aspect_ratio=decrease",
+                "-q:v", "3", str(tmp_path),
             ],
             capture_output=True,
         )
@@ -24,6 +34,17 @@ def extract_frame_at_b64(video_path: Path, t: float) -> str | None:
         tmp_path.unlink(missing_ok=True)
 
 
+def extract_frames_at_b64(video_path: Path, timestamps: list[float]) -> list[str | None]:
+    """Extract multiple frames in parallel - each is an independent ffmpeg subprocess/seek
+    with no shared state, so there's nothing gained by doing them one at a time. Order-
+    preserving (result[i] corresponds to timestamps[i]) so callers can zip them back against
+    whatever metadata (label, cue) each timestamp came from."""
+    if not timestamps:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(timestamps))) as pool:
+        return list(pool.map(lambda t: extract_frame_at_b64(video_path, t), timestamps))
+
+
 def reference_frame_content_blocks(
     video_path: Path, reference_frames: list[tuple[float, str]],
 ) -> list[dict]:
@@ -32,9 +53,11 @@ def reference_frame_content_blocks(
     itself, so a vision-capable LLM call can ground its answer against a known face/identity
     instead of only a prose description of who's who. Shared by the context primer and the
     vision follow-up pass, so both see the same reference images."""
+    if not reference_frames:
+        return []
+    extracted = extract_frames_at_b64(video_path, [t for t, _ in reference_frames])
     blocks: list[dict] = []
-    for t, label in reference_frames:
-        frame = extract_frame_at_b64(video_path, t)
+    for (_, label), frame in zip(reference_frames, extracted):
         if frame is None:
             continue
         blocks.append({"type": "text", "text": f"Reference - this is {label}:"})
@@ -52,9 +75,5 @@ def evenly_spaced_timestamps(start_s: float, end_s: float, num_frames: int) -> l
 
 def extract_frames_b64(video_path: Path, start_s: float, end_s: float, num_frames: int = 3) -> list[str]:
     """Grab num_frames evenly-spaced JPEG frames between start_s and end_s, base64-encoded."""
-    frames = []
-    for t in evenly_spaced_timestamps(start_s, end_s, num_frames):
-        frame = extract_frame_at_b64(video_path, t)
-        if frame is not None:
-            frames.append(frame)
-    return frames
+    timestamps = evenly_spaced_timestamps(start_s, end_s, num_frames)
+    return [f for f in extract_frames_at_b64(video_path, timestamps) if f is not None]

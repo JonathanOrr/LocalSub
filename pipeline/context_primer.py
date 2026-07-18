@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pipeline.llm_client import call_llm, write_raw_log_entry
 from pipeline.srt_utils import srt_timestamp_range_to_seconds
-from pipeline.video_frames import evenly_spaced_timestamps, extract_frame_at_b64
+from pipeline.video_frames import evenly_spaced_timestamps, extract_frames_at_b64
 
 LLM_CONTEXT_PRIMER_PROMPT = (
     "You are given the full transcript of a video's spoken dialogue, along with a handful "
@@ -53,8 +53,8 @@ def build_context_primer(
         "type": "text",
         "text": f"{LLM_CONTEXT_PRIMER_PROMPT}\n\nTranscript:\n{transcript_text}",
     }]
-    for t, label in frames:
-        b64 = extract_frame_at_b64(video_path, t)
+    extracted = extract_frames_at_b64(video_path, [t for t, _ in frames])
+    for (_, label), b64 in zip(frames, extracted):
         if b64 is None:
             continue
         if label:

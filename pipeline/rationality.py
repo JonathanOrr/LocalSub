@@ -143,12 +143,17 @@ def llm_vision_resolve(
         reason = "no frames available, kept the text-only guess"
         frames = extract_frames_b64(video_path, start_s, end_s)
         if frames:
-            content: list[dict] = [{
-                "type": "text",
-                "text": f"{LLM_VISION_PROMPT}\n\nFlagged: [{f.first_cue}-{f.last_cue}] {f.issue}\n"
-                        f"Text-only guess: {f.proposed_fix!r}" + primer_section,
-            }]
+            # constant across every call in this loop (prompt/primer/reference images) goes
+            # first, per-flag content (issue/guess/frames) goes last - so a backend with
+            # prompt/context caching can reuse the KV cache for that shared prefix instead of
+            # recomputing it (including the reference images' vision tokens) on every call.
+            content: list[dict] = [{"type": "text", "text": LLM_VISION_PROMPT + primer_section}]
             content.extend(reference_blocks)
+            content.append({
+                "type": "text",
+                "text": f"\n\nFlagged: [{f.first_cue}-{f.last_cue}] {f.issue}\n"
+                        f"Text-only guess: {f.proposed_fix!r}",
+            })
             for b64 in frames:
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             try:

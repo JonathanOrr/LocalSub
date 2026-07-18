@@ -46,7 +46,11 @@ def llm_translate(
             "brackets, like: [42] translated text here, and nothing else - no explanation, "
             "notes, or commentary before, after, or between lines. Do not merge, split, add, "
             "or omit any numbered lines - every input number must appear exactly once in your reply."
-            + notes_section + primer_section + "\n\n"
+            # primer_section is identical across every batch in this run, notes_section and
+            # transcript_text vary per batch - constant-first lets a backend with prompt/
+            # context caching reuse the KV cache for the shared prefix instead of
+            # recomputing it on every batch.
+            + primer_section + notes_section + "\n\n"
             + transcript_text
         )
         try:
