@@ -7,6 +7,19 @@ from pipeline.orchestrate import PipelineConfig, run_pipeline
 from pipeline.whisper_engine import language_info
 
 
+def _reference_frame(s: str) -> tuple[float, str]:
+    t_str, sep, label = s.partition(":")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"expected TIMESTAMP:LABEL, got {s!r}")
+    try:
+        t = float(t_str)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a numeric timestamp before ':', got {t_str!r}")
+    if not label:
+        raise argparse.ArgumentTypeError(f"expected a non-empty label after ':', got {s!r}")
+    return t, label
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Transcribe + translate a foreign-language video and mux "
@@ -107,13 +120,22 @@ def main() -> None:
     parser.add_argument("--no-context-primer", action="store_true",
                          help="skip the one-time context-primer pass (characters/setting/tone/"
                               "throughline, inferred from the full transcript + sampled frames) "
-                              "that's otherwise prepended as context to the rationality-check "
-                              "and translation prompts")
+                              "that's otherwise prepended as context to the rationality-check, "
+                              "vision follow-up, and translation prompts")
     parser.add_argument("--context-primer-frames", type=int, default=12,
                          help="number of frames sampled evenly across the whole video for the "
                               "context primer (default: 12). Fixed regardless of video length, "
-                              "so cost doesn't scale with runtime. Set to 0 for a text-only "
-                              "primer without vision")
+                              "so cost doesn't scale with runtime. Set to 0 to skip the "
+                              "automatic sampling - note this alone doesn't make the primer "
+                              "text-only if you've also pinned any --reference-frame; those are "
+                              "always included and are only skipped by --no-llm-vision")
+    parser.add_argument("--reference-frame", dest="reference_frames", action="append",
+                         type=_reference_frame, default=[], metavar="TIMESTAMP:LABEL",
+                         help="pin a specific video moment as a labeled reference image (e.g. "
+                              "'132.5:Aki', a character's clear intro shot) - repeatable. Sent "
+                              "to both the context primer and every vision follow-up call, so "
+                              "the LLM has an actual face to match against instead of only a "
+                              "prose guess at who's who. No effect if --no-llm-vision is set")
     parser.add_argument("--no-transcript-review", action="store_true",
                          help="skip the pre-translation pause that lets you fix transcription "
                               "mistakes by hand ('e' opens the source-language .srt in $EDITOR, "

@@ -74,6 +74,7 @@ document.getElementById("browseBtn").addEventListener("click", () => {
 
 resetBtn.addEventListener("click", () => {
   form.reset();
+  clearRefFramePicker();
   renderVadViz();
 });
 
@@ -99,6 +100,7 @@ document.querySelectorAll(".section-reset-btn").forEach((btn) => {
     const target = document.getElementById(btn.dataset.resetTarget);
     resetFieldsIn(target);
     if (btn.dataset.resetTarget === "panelVad") renderVadViz();
+    if (btn.dataset.resetTarget === "panelLlm") clearRefFramePicker();
   });
 });
 const confirmBody = document.getElementById("confirmBody");
@@ -118,6 +120,7 @@ function buildPayload() {
   for (const f of INT_FIELDS) payload[f] = parseInt(data.get(f), 10);
   for (const f of FLOAT_FIELDS) payload[f] = parseFloat(data.get(f));
   for (const f of STR_FIELDS) payload[f] = data.get(f);
+  payload.reference_frames = referenceFrames;
   return payload;
 }
 
@@ -195,6 +198,151 @@ function showTranscriptConfirm(event) {
   confirmArea.style.display = "block";
 }
 
+function showPrimerFramesConfirm(event) {
+  confirmTitle.textContent = "Review frames before the context primer";
+  const working = event.frames.map((f) => ({ t: f.t, label: f.label }));
+  let captured = null; // { t } once "Capture"/"Preview" has loaded a pending new frame
+
+  function renderList(listEl) {
+    listEl.innerHTML = "";
+    if (working.length === 0) {
+      const none = document.createElement("p");
+      none.className = "text-muted small fst-italic";
+      none.textContent = "No automatically-sampled frames left here - any reference frames you already pinned are still included regardless.";
+      listEl.appendChild(none);
+      return;
+    }
+    working.forEach((f, i) => {
+      const row = document.createElement("div");
+      row.className = "d-flex align-items-center gap-2 mb-2";
+
+      const img = document.createElement("img");
+      img.className = "rounded border";
+      img.style.height = "70px";
+      img.src = `/api/frame_preview?path=${encodeURIComponent(event.video_path)}&t=${f.t}`;
+
+      const tInput = document.createElement("input");
+      tInput.type = "number";
+      tInput.step = "0.1";
+      tInput.min = "0";
+      tInput.className = "form-control form-control-sm";
+      tInput.style.width = "6rem";
+      tInput.value = f.t;
+      tInput.onchange = () => {
+        f.t = parseFloat(tInput.value) || 0;
+        img.src = `/api/frame_preview?path=${encodeURIComponent(event.video_path)}&t=${f.t}`;
+      };
+
+      const labelInput = document.createElement("input");
+      labelInput.type = "text";
+      labelInput.className = "form-control form-control-sm";
+      labelInput.placeholder = "Label (optional)";
+      labelInput.value = f.label;
+      labelInput.onchange = () => {
+        f.label = labelInput.value;
+      };
+
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "btn btn-sm btn-outline-danger";
+      rm.textContent = "Remove";
+      rm.onclick = () => {
+        working.splice(i, 1);
+        renderList(listEl);
+      };
+
+      row.append(img, tInput, labelInput, rm);
+      listEl.appendChild(row);
+    });
+  }
+
+  confirmBody.innerHTML = `
+    <p class="text-muted small">
+      These are the frames automatically sampled for the context primer (any reference
+      frames you already pinned are sent too, but aren't re-listed here - you already
+      curated those). Adjust, remove, or add frames below before continuing. A labeled
+      frame also gets reused as a reference image in every vision follow-up call later
+      in the run.
+    </p>
+    <div id="primerFramesList"></div>
+    <hr>
+    <p class="text-muted small mb-1">Add another frame - scrub the video below, or enter a timestamp by hand:</p>
+    <video id="primerFramesVideo" controls style="display:block; max-width:100%; max-height:200px; background:#000;"></video>
+    <div class="d-flex align-items-end gap-2 mt-2 flex-wrap">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="primerFramesCaptureBtn">Capture frame at current position</button>
+      <div>
+        <label class="form-label small mb-0">or Timestamp (s)</label>
+        <input type="number" step="0.1" min="0" class="form-control form-control-sm" id="primerFramesManualTime" style="width: 8rem">
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="primerFramesManualPreviewBtn">Preview</button>
+    </div>
+    <div class="d-flex align-items-center gap-2 mt-2">
+      <img id="primerFramesCaptureImg" style="display:none; max-height: 70px;" class="rounded border">
+      <input type="text" class="form-control form-control-sm" id="primerFramesCaptureLabel" placeholder="Label (optional)" style="width: 12rem; display:none" >
+      <button type="button" class="btn btn-sm btn-primary" id="primerFramesAddBtn" style="display:none">Add</button>
+      <span id="primerFramesAddStatus" class="text-muted small"></span>
+    </div>
+  `;
+  const listEl = document.getElementById("primerFramesList");
+  renderList(listEl);
+
+  const video = document.getElementById("primerFramesVideo");
+  const captureBtn = document.getElementById("primerFramesCaptureBtn");
+  const manualTime = document.getElementById("primerFramesManualTime");
+  const manualPreviewBtn = document.getElementById("primerFramesManualPreviewBtn");
+  const captureImg = document.getElementById("primerFramesCaptureImg");
+  const captureLabel = document.getElementById("primerFramesCaptureLabel");
+  const addBtn = document.getElementById("primerFramesAddBtn");
+  const addStatus = document.getElementById("primerFramesAddStatus");
+
+  video.onerror = () => {
+    addStatus.textContent = "Couldn't play this video in the browser - use the timestamp field instead.";
+  };
+  video.src = `/api/video?path=${encodeURIComponent(event.video_path)}`;
+
+  function previewCapture(t) {
+    if (isNaN(t) || t < 0) {
+      addStatus.textContent = "Enter a valid timestamp.";
+      return;
+    }
+    captured = null;
+    addBtn.style.display = "none";
+    addStatus.textContent = "Loading preview...";
+    captureImg.onload = () => {
+      addStatus.textContent = "";
+      captured = { t };
+      captureLabel.style.display = "inline-block";
+      addBtn.style.display = "inline-block";
+    };
+    captureImg.onerror = () => {
+      addStatus.textContent = "Couldn't extract a frame at that timestamp.";
+      captureImg.style.display = "none";
+    };
+    captureImg.style.display = "inline-block";
+    captureImg.src = `/api/frame_preview?path=${encodeURIComponent(event.video_path)}&t=${t}`;
+  }
+
+  captureBtn.addEventListener("click", () => previewCapture(video.currentTime));
+  manualPreviewBtn.addEventListener("click", () => previewCapture(parseFloat(manualTime.value)));
+
+  addBtn.addEventListener("click", () => {
+    if (!captured) return;
+    working.push({ t: captured.t, label: captureLabel.value.trim() });
+    renderList(listEl);
+    captureLabel.value = "";
+    captureImg.style.display = "none";
+    captureLabel.style.display = "none";
+    addBtn.style.display = "none";
+    captured = null;
+  });
+
+  confirmButtons.innerHTML = `<button class="btn btn-primary btn-sm" id="continuePrimerFrames">Continue</button>`;
+  document.getElementById("continuePrimerFrames").onclick = () => {
+    submitConfirm({ frames: working.map((f) => ({ t: f.t, label: f.label })) });
+  };
+  confirmArea.style.display = "block";
+}
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   runBtn.disabled = true;
@@ -218,6 +366,7 @@ form.addEventListener("submit", (e) => {
           if (event.kind === "changes") showChangesConfirm(event);
           else if (event.kind === "primer") showPrimerConfirm(event);
           else if (event.kind === "transcript") showTranscriptConfirm(event);
+          else if (event.kind === "primer_frames") showPrimerFramesConfirm(event);
         } else if (event.type === "done") {
           appendLog(`\nDone: ${event.output_path}`);
           appendLog(`  Source subtitles (${event.lang}): ${event.src_srt}`);
@@ -455,6 +604,12 @@ videoPathInput.addEventListener("input", () => {
     vadAnalyzeStatus.textContent = "Video path changed - click Analyze again to refresh.";
     renderVadViz();
   }
+  if (refFrameLoadedPath !== null && refFrameLoadedPath !== videoPathInput.value.trim()) {
+    refFrameLoadedPath = null;
+    refFrameVideo.style.display = "none";
+    refFrameCaptureRow.style.display = "none";
+    refFrameVideoStatus.textContent = "Video path changed - click Load video again to refresh.";
+  }
 });
 
 // click-to-play: boxes are only playable when using real data (a delegated listener since
@@ -468,4 +623,150 @@ document.getElementById("vadViz").addEventListener("click", (e) => {
   new Audio(url).play().catch((err) => {
     vadAnalyzeStatus.textContent = `Playback error: ${err}`;
   });
+});
+
+// --- Reference frames: pin labeled character-identity frames (e.g. a clear intro shot),
+// sent to both the context primer and every vision follow-up call (see
+// PipelineConfig.reference_frames / pipeline.video_frames.reference_frame_content_blocks) so
+// the LLM has an actual face to match against instead of only a prose guess at who's who.
+let referenceFrames = [];
+let refFrameLoadedPath = null;
+
+const refFrameTime = document.getElementById("refFrameTime");
+const refFrameLabel = document.getElementById("refFrameLabel");
+const refFramePreviewBtn = document.getElementById("refFramePreviewBtn");
+const refFrameAddBtn = document.getElementById("refFrameAddBtn");
+const refFrameStatus = document.getElementById("refFrameStatus");
+const refFramePreviewImg = document.getElementById("refFramePreviewImg");
+const refFrameList = document.getElementById("refFrameList");
+const refFrameLoadVideoBtn = document.getElementById("refFrameLoadVideoBtn");
+const refFrameVideoStatus = document.getElementById("refFrameVideoStatus");
+const refFrameVideo = document.getElementById("refFrameVideo");
+const refFrameCaptureRow = document.getElementById("refFrameCaptureRow");
+const refFrameCaptureBtn = document.getElementById("refFrameCaptureBtn");
+
+function clearRefFramePicker() {
+  referenceFrames = [];
+  renderRefFrameList();
+  refFrameLoadedPath = null;
+  refFrameVideo.removeAttribute("src");
+  refFrameVideo.style.display = "none";
+  refFrameCaptureRow.style.display = "none";
+  refFrameVideoStatus.textContent = "";
+  refFramePreviewImg.style.display = "none";
+  refFrameStatus.textContent = "";
+  refFrameAddBtn.disabled = true;
+}
+
+function renderRefFrameList() {
+  refFrameList.innerHTML = "";
+  referenceFrames.forEach((rf, i) => {
+    const badge = document.createElement("span");
+    badge.className = "badge text-bg-secondary d-flex align-items-center gap-2";
+    badge.style.fontSize = "0.85rem";
+    badge.style.cursor = "pointer";
+    badge.title = "Click to edit";
+    const label = document.createElement("span");
+    label.textContent = `${rf.t.toFixed(1)}s: ${rf.label}`;
+    badge.appendChild(label);
+    badge.addEventListener("click", () => editRefFrame(i));
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "btn-close btn-close-white";
+    rm.style.fontSize = "0.55rem";
+    rm.setAttribute("aria-label", "Remove");
+    rm.onclick = (e) => {
+      e.stopPropagation();
+      referenceFrames.splice(i, 1);
+      renderRefFrameList();
+    };
+    badge.appendChild(rm);
+    refFrameList.appendChild(badge);
+  });
+}
+
+// Editing a pinned reference frame just pulls it back out of the list and back into the
+// picker fields (pre-loading its preview) - reuses the exact same preview/Add flow as
+// adding a new one, rather than a separate edit-in-place state machine.
+function editRefFrame(i) {
+  const rf = referenceFrames[i];
+  referenceFrames.splice(i, 1);
+  renderRefFrameList();
+  refFrameLabel.value = rf.label;
+  previewRefFrameAt(rf.t);
+}
+
+function previewRefFrameAt(t) {
+  const videoPath = videoPathInput.value.trim();
+  refFrameAddBtn.disabled = true;
+  if (!videoPath) {
+    refFrameStatus.textContent = "Enter a video path above first.";
+    return;
+  }
+  if (isNaN(t) || t < 0) {
+    refFrameStatus.textContent = "Enter a valid timestamp.";
+    return;
+  }
+  refFrameTime.value = t.toFixed(2);
+  refFrameStatus.textContent = "Loading preview...";
+  const url = `/api/frame_preview?path=${encodeURIComponent(videoPath)}&t=${t}`;
+  refFramePreviewImg.onload = () => {
+    refFrameStatus.textContent = "";
+    refFrameAddBtn.disabled = false;
+  };
+  refFramePreviewImg.onerror = () => {
+    refFrameStatus.textContent = "Couldn't extract a frame at that timestamp.";
+    refFramePreviewImg.style.display = "none";
+  };
+  refFramePreviewImg.style.display = "inline-block";
+  refFramePreviewImg.src = url;
+}
+
+refFramePreviewBtn.addEventListener("click", () => {
+  previewRefFrameAt(parseFloat(refFrameTime.value));
+});
+
+// Real <video> element with native seeking, so you can scrub to the moment you want instead
+// of guessing a timestamp - "Capture" just reads currentTime and reuses the same
+// server-side (ffmpeg) preview/extraction path as manual entry, so what gets pinned is
+// exactly what the pipeline will later extract, not a browser-decoded approximation.
+refFrameLoadVideoBtn.addEventListener("click", () => {
+  const videoPath = videoPathInput.value.trim();
+  if (!videoPath) {
+    refFrameVideoStatus.textContent = "Enter a video path above first.";
+    return;
+  }
+  refFrameVideoStatus.textContent = "Loading...";
+  refFrameVideo.onloadedmetadata = () => {
+    refFrameVideoStatus.textContent = "";
+    refFrameVideo.style.display = "block";
+    refFrameCaptureRow.style.display = "block";
+    refFrameLoadedPath = videoPath;
+  };
+  refFrameVideo.onerror = () => {
+    refFrameVideoStatus.textContent = "Couldn't play this video in the browser - use the manual timestamp field below instead.";
+    refFrameVideo.style.display = "none";
+    refFrameCaptureRow.style.display = "none";
+    refFrameLoadedPath = null;
+  };
+  refFrameVideo.src = `/api/video?path=${encodeURIComponent(videoPath)}`;
+});
+
+refFrameCaptureBtn.addEventListener("click", () => {
+  previewRefFrameAt(refFrameVideo.currentTime);
+});
+
+refFrameAddBtn.addEventListener("click", () => {
+  const t = parseFloat(refFrameTime.value);
+  const label = refFrameLabel.value.trim();
+  if (isNaN(t) || t < 0 || !label) {
+    refFrameStatus.textContent = "Need both a previewed timestamp and a label.";
+    return;
+  }
+  referenceFrames.push({ t, label });
+  renderRefFrameList();
+  refFrameLabel.value = "";
+  refFramePreviewImg.style.display = "none";
+  refFrameAddBtn.disabled = true;
+  refFrameStatus.textContent = "";
 });

@@ -112,6 +112,35 @@ def make_web_confirm_transcript(job: Job):
     return web_confirm_transcript
 
 
+def make_web_confirm_primer_frames(job: Job, video_path: Path):
+    """Drop-in replacement for pipeline.orchestrate.confirm_primer_frames: pauses right
+    before the context primer call with the full set of frames about to be sent - both the
+    automatically evenly-sampled ones and any pinned reference frames, merged - so the
+    browser can review/relabel/retime/delete/add before continuing. Unlike the CLI, which
+    has no interactive equivalent and just uses the default plan plus whatever
+    --reference-frame flags were given. Unlabeled entries are kept (an empty label is a
+    valid "just context" frame, not just a name-less reference)."""
+    def web_confirm_primer_frames(
+        frames: list[tuple[float, str]], auto_confirm: bool,
+    ) -> list[tuple[float, str]]:
+        if auto_confirm or not frames:
+            return frames
+        job.confirm_event.clear()
+        job.pending_confirm = {
+            "kind": "primer_frames", "video_path": str(video_path),
+            "frames": [{"t": t, "label": label} for t, label in frames],
+        }
+        job.status = "waiting_confirm"
+        job.emit({"type": "confirm_request", **job.pending_confirm})
+        job.confirm_event.wait()
+        job.status = "running"
+        response = job.confirm_response or {}
+        job.pending_confirm = None
+        edited = response.get("frames", [])
+        return [(float(f["t"]), str(f.get("label", "")).strip()) for f in edited]
+    return web_confirm_primer_frames
+
+
 def start_job(video_path: Path, config: PipelineConfig) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = Job(id=job_id)
@@ -124,6 +153,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 confirm_changes_fn=make_web_confirm_changes(job),
                 confirm_primer_fn=make_web_confirm_primer(job),
                 confirm_transcript_fn=make_web_confirm_transcript(job),
+                confirm_primer_frames_fn=make_web_confirm_primer_frames(job, video_path),
                 log_fn=job.log,
             )
             job.result = {

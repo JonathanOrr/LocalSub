@@ -190,7 +190,7 @@
               <input type="text" class="form-control" name="llm_model" value="{{ defaults.llm_model }}">
             </div>
             <div class="col-md-3">
-              <label class="form-label">Context primer frames</label>
+              <label class="form-label" title="Setting this to 0 only skips the automatic evenly-sampled frames - any reference frames you've pinned below are still always included. Only &quot;Disable vision&quot; skips those too.">Context primer frames</label>
               <input type="number" class="form-control" name="context_primer_frames" value="{{ defaults.context_primer_frames }}">
             </div>
             <div class="col-md-3 d-flex align-items-end">
@@ -222,6 +222,42 @@
                 <input class="form-check-input" type="checkbox" name="auto_confirm" id="auto_confirm">
                 <label class="form-check-label" for="auto_confirm">Auto-confirm all fixes</label>
               </div>
+            </div>
+            <div class="col-12">
+              <hr>
+              <p class="text-muted small mb-1">
+                Pin specific video moments as labeled reference frames (e.g. a character's
+                clear intro shot) - sent to both the context primer and every vision
+                follow-up call, so the LLM has an actual face to match against instead of
+                only a prose guess at who's who. No effect if vision is disabled above.
+              </p>
+              <div class="d-flex align-items-center gap-2 mb-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="refFrameLoadVideoBtn">Load video</button>
+                <span id="refFrameVideoStatus" class="text-muted small"></span>
+              </div>
+              <video id="refFrameVideo" controls style="display:none; max-width: 100%; max-height: 220px; background: #000;"></video>
+              <div id="refFrameCaptureRow" style="display:none" class="mt-2">
+                <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameCaptureBtn">Capture frame at current position</button>
+              </div>
+              <p class="text-muted small mt-2 mb-1">
+                Or enter a timestamp by hand (needed if the video above won't play in the
+                browser - not every source format is browser-playable):
+              </p>
+              <div class="d-flex align-items-end gap-2 flex-wrap">
+                <div>
+                  <label class="form-label small mb-0">Timestamp (s)</label>
+                  <input type="number" step="0.1" min="0" class="form-control form-control-sm" id="refFrameTime" style="width: 8rem">
+                </div>
+                <div>
+                  <label class="form-label small mb-0">Label (e.g. character name)</label>
+                  <input type="text" class="form-control form-control-sm" id="refFrameLabel" style="width: 12rem">
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="refFramePreviewBtn">Preview</button>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="refFrameAddBtn" disabled>Add</button>
+                <span id="refFrameStatus" class="text-muted small"></span>
+              </div>
+              <img id="refFramePreviewImg" class="mt-2 rounded border" style="display:none; max-height: 160px;">
+              <div id="refFrameList" class="d-flex flex-wrap gap-2 mt-2"></div>
             </div>
           </div>
         </div>

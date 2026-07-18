@@ -1,11 +1,11 @@
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from pipeline.changes import ProposedChange, apply_changes, confirm_changes
-from pipeline.context_primer import build_context_primer, confirm_context_primer
+from pipeline.context_primer import build_context_primer, confirm_context_primer, default_primer_frame_plan
 from pipeline.rationality import llm_check_rationality, llm_vision_resolve, rationality_flag_to_change
 from pipeline.repeats import detect_char_repeats, detect_repeats, llm_resolve_repeats
 from pipeline.srt_utils import parse_srt_cues, write_srt
@@ -17,6 +17,7 @@ from pipeline.whisper_engine import check_dependencies, extract_audio, language_
 ConfirmChangesFn = Callable[[str, list[ProposedChange], bool], list[ProposedChange]]
 ConfirmPrimerFn = Callable[[str, bool], str | None]
 ConfirmTranscriptFn = Callable[[Path, bool], None]
+ConfirmPrimerFramesFn = Callable[[list[tuple[float, str]], bool], list[tuple[float, str]]]
 
 
 @dataclass
@@ -51,8 +52,36 @@ class PipelineConfig:
     no_llm_vision: bool = False
     no_context_primer: bool = False
     context_primer_frames: int = 12
+    # user-pinned (timestamp, label) reference frames, e.g. a character's intro shot - CLI
+    # gives (float, str) tuples directly, the web UI's JSON payload gives {"t":..,"label":..}
+    # dicts (JSON has no tuple type); normalized once via _normalize_reference_frames()
+    reference_frames: list = field(default_factory=list)
     no_transcript_review: bool = False
     auto_confirm: bool = False
+
+
+def _normalize_reference_frames(raw: list) -> list[tuple[float, str]]:
+    """Normalize PipelineConfig.reference_frames from whatever shape it arrived in: argparse
+    gives (float, str) tuples directly (see subtranslate.py's --reference-frame parser), the
+    web UI's JSON payload gives {"t": ..., "label": ...} dicts, since JSON has no tuple type."""
+    result = []
+    for item in raw:
+        if isinstance(item, dict):
+            result.append((float(item["t"]), str(item["label"])))
+        else:
+            t, label = item
+            result.append((float(t), str(label)))
+    return result
+
+
+def confirm_primer_frames(frames: list[tuple[float, str]], auto_confirm: bool) -> list[tuple[float, str]]:
+    """CLI default: no interactive review - the repeatable --reference-frame flags are
+    already the CLI's own editing mechanism (re-run with different flags to change them), so
+    just pass whatever was configured straight through, unlabeled evenly-sampled frames and
+    all. The web UI overrides this with a real pause (see
+    webapp.runner.make_web_confirm_primer_frames) to review/relabel/retime/delete/add frames
+    right before they're sent to build the context primer."""
+    return frames
 
 
 @dataclass
@@ -69,15 +98,17 @@ def run_pipeline(
     confirm_changes_fn: ConfirmChangesFn = confirm_changes,
     confirm_primer_fn: ConfirmPrimerFn = confirm_context_primer,
     confirm_transcript_fn: ConfirmTranscriptFn = confirm_transcript,
+    confirm_primer_frames_fn: ConfirmPrimerFramesFn = confirm_primer_frames,
     log_fn: Callable[[str], None] = print,
 ) -> PipelineResult:
     """The full pipeline: extract audio -> (optional TEN VAD pre-pass) -> transcribe ->
-    (optional) repeat-resolution -> context primer -> rationality+vision check ->
-    (optional) human transcript review -> translate -> mux. Shared by subtranslate.py's CLI
-    and the web UI - the only things either caller customizes are how a proposed-changes/
-    primer/transcript-edit confirmation is obtained (confirm_changes_fn/confirm_primer_fn/
-    confirm_transcript_fn - block on a terminal prompt for the CLI, wait on a browser click
-    for the web UI) and where status lines go (log_fn)."""
+    (optional) repeat-resolution -> primer-frame review -> context primer ->
+    rationality+vision check -> (optional) human transcript review -> translate -> mux.
+    Shared by subtranslate.py's CLI and the web UI - the only things either caller
+    customizes are how a proposed-changes/primer/transcript-edit/primer-frames
+    confirmation is obtained (confirm_changes_fn/confirm_primer_fn/confirm_transcript_fn/
+    confirm_primer_frames_fn - block on a terminal prompt for the CLI, wait on a browser
+    click for the web UI) and where status lines go (log_fn)."""
     if config.engine == "whisper" and config.target_lang != "en" and not config.no_translate:
         sys.exit(
             "whisper.cpp's built-in --translate only supports English as a target - "
@@ -131,6 +162,9 @@ def run_pipeline(
     final_notes: list[str] = []
     context_primer: str | None = None
     if not config.no_llm_check:
+        # disabling vision means no images anywhere, including user-pinned reference frames
+        reference_frames = [] if config.no_llm_vision else _normalize_reference_frames(config.reference_frames)
+
         repeats = detect_repeats(src_srt, config.flag_repeat_count)
         repeats += detect_char_repeats(parse_srt_cues(src_srt), config.flag_repeat_count)
         repeats.sort(key=lambda r: int(r.first_cue))
@@ -146,8 +180,20 @@ def run_pipeline(
             write_srt(apply_changes(parse_srt_cues(src_srt), confirmed), src_srt)
 
         if not config.no_context_primer:
+            # only the auto-sampled default plan goes through confirm_primer_frames_fn -
+            # pinned reference frames were already deliberately curated in the picker (load
+            # video, scrub, capture, label, add), so re-showing them for review/deletion here
+            # would just be re-litigating a decision already made. They're still always
+            # included in what's sent to the primer, just not re-editable at this stage. A
+            # frame labeled during this review (whether it started blank or was relabeled)
+            # also becomes a reference frame for every later vision follow-up call.
+            primer_frame_count = 0 if config.no_llm_vision else config.context_primer_frames
+            default_frames = default_primer_frame_plan(parse_srt_cues(src_srt), primer_frame_count)
+            confirmed_default_frames = confirm_primer_frames_fn(default_frames, config.auto_confirm)
+            primer_frames = confirmed_default_frames + reference_frames
+            reference_frames = reference_frames + [(t, label) for t, label in confirmed_default_frames if label]
+
             log_fn("  Building context primer (characters/setting/tone) from the full transcript...")
-            primer_frames = 0 if config.no_llm_vision else config.context_primer_frames
             raw_primer = build_context_primer(
                 parse_srt_cues(src_srt), video_path, primer_frames, config.llm_endpoint, config.llm_model,
                 raw_log_path=out_dir / f"{src_srt.stem}.llm_context_primer.md",
@@ -171,7 +217,7 @@ def run_pipeline(
             vision_changes = llm_vision_resolve(
                 need_vision, cues, video_path, config.llm_endpoint, config.llm_model,
                 raw_log_path=out_dir / f"{src_srt.stem}.llm_vision.md",
-                context_primer=context_primer,
+                context_primer=context_primer, reference_frames=reference_frames,
             )
         cue_by_num = {int(num): ts for num, ts, text in cues}
         text_changes = []

@@ -17,8 +17,13 @@ other OpenAI-compatible local server).
      e.g. `ああああああ`). This is detected purely mathematically, then only the flagged
      snippets are sent to the LLM to decide how to fix them.
    - **Context primer** - one pass over the full transcript plus a handful of frames
-     sampled across the video, producing a short "characters/setting/tone" primer that
-     gets used as context for the next two steps.
+     sampled evenly across the video, producing a short "characters/setting/tone" primer
+     that gets used as context for the next two steps. You can also pin specific moments
+     as labeled reference frames (e.g. a character's clear intro shot, scrubbed to via a
+     real video player in the web UI) - these ride along with the primer and every later
+     vision follow-up call, and you get a chance to review/relabel/retime/delete/add the
+     automatically-sampled frames (though not the ones you already pinned - those were
+     already deliberately curated) right before the primer call fires.
    - **Rationality check** - scans the cleaned transcript for anything garbled or
      implausible, asking the LLM to say whether it's confident in a text-only fix or
      needs to see the video at that moment.
@@ -53,7 +58,12 @@ flowchart TD
     B -->|"flagged snippets only"| C["Repeat resolution<br/><b>1 call, total</b>"]
     C --> D[Transcript after repeat fixes]
 
-    D -->|"FULL transcript text<br/>+ N sampled frames"| E["Context primer<br/><b>1 call, total</b>"]
+    D -->|"N evenly-sampled<br/>timestamps, unlabeled"| PFR{{"Primer-frame review<br/><i>human edit, no LLM</i><br/>only the auto-sampled ones -<br/>pinned frames aren't re-shown"}}
+    RF[("Pinned reference frames<br/>(picker: scrub video + label)")]
+
+    D -->|"FULL transcript text"| E["Context primer<br/><b>1 call, total</b>"]
+    PFR -->|"confirmed/edited/added"| E
+    RF -->|"always included"| E
     E --> P[("Primer text<br/>(characters/setting/tone)")]
 
     D -->|"40 cues per call<br/>batches don't see each other"| F["Rationality check<br/><b>1 call per 40-cue batch</b>"]
@@ -61,6 +71,8 @@ flowchart TD
 
     F -->|"cues flagged<br/>NEEDS_VISION"| G["Vision follow-up<br/><b>1 call per flagged cue</b><br/>sees: its own text guess<br/>+ frames at that timestamp"]
     P -.->|"prepended to every call"| G
+    RF -.->|"as reference images"| G
+    PFR -.->|"any frame labeled here,<br/>also as a reference image"| G
     F -->|"text-only decided fixes"| CC["Confirmed fixes<br/><i>you review/exclude before applying</i>"]
     G --> CC
 
@@ -80,9 +92,10 @@ flowchart TD
 | Stage | # of calls | Sees | Never sees |
 |---|---|---|---|
 | Repeat resolution | 1, total | only the flagged repeat/character-run snippets | the rest of the transcript, the primer, video frames |
-| Context primer | 1, total | the full transcript (after repeat fixes) + N sampled frames | anything (it runs first - nothing to carry forward yet) |
+| Primer-frame review | 1 pause, total | the N auto-sampled timestamps (not an LLM call - a human edit; pinned reference frames aren't shown here, they're already included regardless) | - |
+| Context primer | 1, total | the full transcript (after repeat fixes) + the reviewed auto-sampled frames + any pinned reference frames | anything (it runs first - nothing to carry forward yet) |
 | Rationality check | 1 per 40-cue batch | the primer + that batch's 40 cues (after repeat fixes) | other batches, video frames (text-only pass), repeat-resolution's decisions |
-| Vision follow-up | 1 per flagged cue | the primer + that cue's own issue/guess + frames from that exact moment | surrounding cues, any other flagged cue |
+| Vision follow-up | 1 per flagged cue | the primer + any pinned/labeled reference frames (as images) + that cue's own issue/guess + frames from that exact moment | surrounding cues, any other flagged cue |
 | Transcript review | 1 pause, total | the full transcript, after every automated fix (not an LLM call - a human edit) | - |
 | Translation | 1 per 40-cue batch | the primer + notes relevant to that batch's cue range + that batch's 40 cues, **after every prior fix including any manual edit** | other batches' cues, or how they were translated |
 

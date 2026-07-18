@@ -6,7 +6,7 @@ from typing import NamedTuple
 from pipeline.changes import ProposedChange
 from pipeline.llm_client import LLM_CHUNK_SIZE, call_llm, write_raw_log_entry
 from pipeline.srt_utils import srt_timestamp_range_to_seconds
-from pipeline.video_frames import extract_frames_b64
+from pipeline.video_frames import extract_frames_b64, reference_frame_content_blocks
 
 
 class RationalityFlag(NamedTuple):
@@ -90,11 +90,14 @@ def rationality_flag_to_change(f: RationalityFlag, cue_by_num: dict[int, str]) -
 LLM_VISION_PROMPT = (
     "A transcript review flagged the subtitle line below as a likely error, with an initial "
     "text-only best-guess fix already made. You are given a few frames, in chronological "
-    "order, from the video at that exact moment to confirm or improve that guess. Take the "
-    "time you need to reason through what the frames show and weigh alternatives - but once "
-    "you reach a conclusion, commit to it: do not restart your reasoning from scratch or go "
-    "back and forth indecisively. Reply in EXACTLY this format, and nothing else - no "
-    "explanation before or after:\n"
+    "order, from the video at that exact moment to confirm or improve that guess. Some "
+    "frames earlier in the message may instead be explicitly labeled reference images of a "
+    "named character (e.g. 'Reference - this is Aki:') - treat those labels as reliable "
+    "ground truth and use them to recognize who appears in the frames at the flagged "
+    "moment. Take the time you need to reason through what the frames show and weigh "
+    "alternatives - but once you reach a conclusion, commit to it: do not restart your "
+    "reasoning from scratch or go back and forth indecisively. Reply in EXACTLY this "
+    "format, and nothing else - no explanation before or after:\n"
     "FIX: your best guess at the correct text (repeat the text-only guess if the frames "
     "don't change your assessment)\n"
     "REASON: one brief sentence on what the frames showed and why"
@@ -106,13 +109,16 @@ LLM_VISION_REASON_RE = re.compile(r"REASON:\s*(.*?)\s*$", re.IGNORECASE | re.DOT
 def llm_vision_resolve(
     flags: list[RationalityFlag], cues: list[tuple[str, str, str]], video_path: Path,
     endpoint: str, model: str, raw_log_path: Path | None = None,
-    context_primer: str | None = None,
+    context_primer: str | None = None, reference_frames: list[tuple[float, str]] | None = None,
 ) -> list[ProposedChange]:
     """Only called for the RationalityFlags that asked for vision - pulls frames and lets
     the model confirm/improve its own text-only guess. Unlike the rationality-check and
     translation passes, this one otherwise has zero sense of the broader video (who's
     speaking, established names/setting) - just one flagged line, its guess, and a few
-    frames from that exact second - so the primer is worth the extra per-call tokens here."""
+    frames from that exact second - so the primer is worth the extra per-call tokens here.
+    reference_frames (user-pinned timestamp + name pairs) are attached to every call here,
+    not just the primer, so the model has an actual face to match against instead of only a
+    prose description of who's who."""
     if not flags:
         return []
     cue_by_num = {int(num): (ts, text) for num, ts, text in cues}
@@ -122,6 +128,7 @@ def llm_vision_resolve(
         f"\n\nContext on the video (best-effort, may be incomplete - use as a hint, not fact):\n"
         f"{context_primer}\n" if context_primer else ""
     )
+    reference_blocks = reference_frame_content_blocks(video_path, reference_frames or [])
 
     changes = []
     for f in flags:
@@ -141,6 +148,7 @@ def llm_vision_resolve(
                 "text": f"{LLM_VISION_PROMPT}\n\nFlagged: [{f.first_cue}-{f.last_cue}] {f.issue}\n"
                         f"Text-only guess: {f.proposed_fix!r}" + primer_section,
             }]
+            content.extend(reference_blocks)
             for b64 in frames:
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             try:

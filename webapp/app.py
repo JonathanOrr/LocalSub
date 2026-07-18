@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from pipeline.orchestrate import PipelineConfig
 from pipeline.vad_ten import detect_raw_speech_runs
@@ -103,6 +103,50 @@ def audio_clip():
     if proc.returncode != 0:
         return jsonify({"error": proc.stderr.decode(errors="replace")}), 500
     return Response(proc.stdout, mimetype="audio/mpeg")
+
+
+@app.route("/api/video")
+def video_file():
+    """Serve the video file itself, Range-request aware (Flask's conditional send_file
+    handles the 206 Partial Content dance), so the reference-frame picker can use a real
+    <video> element with native seeking instead of guessing timestamps blind. Not all
+    accepted source formats play back in a browser (e.g. .avi/.wmv rarely do) - the manual
+    timestamp field stays as a fallback for those."""
+    raw_path = request.args.get("path", "")
+    video_path = Path(raw_path)
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+    return send_file(video_path, conditional=True)
+
+
+@app.route("/api/frame_preview")
+def frame_preview():
+    """Extract a single frame at a given timestamp, on demand - powers the reference-frame
+    picker in the web UI, so you can scrub to a moment and see it before pinning it as a
+    labeled reference (see PipelineConfig.reference_frames)."""
+    raw_path = request.args.get("path", "")
+    t_raw = request.args.get("t")
+    if t_raw is None:
+        return jsonify({"error": "t is required"}), 400
+    try:
+        t = float(t_raw)
+    except ValueError:
+        return jsonify({"error": "t must be a number"}), 400
+    if t < 0:
+        return jsonify({"error": "t must be >= 0"}), 400
+
+    video_path = Path(raw_path)
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+
+    cmd = [
+        "ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(video_path),
+        "-frames:v", "1", "-q:v", "3", "-f", "image2", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not proc.stdout:
+        return jsonify({"error": proc.stderr.decode(errors="replace") or "no frame extracted"}), 500
+    return Response(proc.stdout, mimetype="image/jpeg")
 
 
 @app.route("/api/jobs", methods=["POST"])
