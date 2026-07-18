@@ -25,11 +25,75 @@ other OpenAI-compatible local server).
    - **Vision follow-up** - only for the cues that asked for it, pulls a few frames from
      that exact moment and lets the LLM confirm or improve its guess.
    - You confirm/exclude each batch of proposed fixes before anything is applied.
+   - **Transcript review** - a final pause before translation where you can fix anything
+     the automated passes missed by hand (opens in `$EDITOR` on the CLI, an editable
+     textarea in the web UI).
 3. Translates the (now-cleaned) transcript, either via whisper.cpp's own built-in
    English-only translation, or via the local LLM for any target language (using the
    context primer and confirmed fixes as context).
 4. Muxes the source-language and translated subtitle tracks into an `.mkv` alongside the
    original video/audio, untouched.
+
+## What the LLM "remembers" at each stage
+
+The local LLM has no built-in memory across calls - every request below is a single,
+independent HTTP call with no chat history and no system prompt. Whatever context a stage
+needs, the pipeline must explicitly paste back into that call's prompt as plain text. Only
+two things get carried forward this way: the **context primer** and the **confirmed-fix
+notes** - everything else is regenerated fresh, call by call.
+
+Every write-back below overwrites the same `.srt` file in place - there's no "repeat-fix-only"
+or "rationality-fix-only" snapshot that survives; each stage only ever reads whatever the
+file currently contains.
+
+```mermaid
+flowchart TD
+    A[Whisper transcript] --> B{{"Repeat-loop detection<br/><i>regex only, no LLM</i>"}}
+
+    B -->|"flagged snippets only"| C["Repeat resolution<br/><b>1 call, total</b>"]
+    C --> D[Transcript after repeat fixes]
+
+    D -->|"40 cues per call<br/>batches don't see each other"| F["Rationality check<br/><b>1 call per 40-cue batch</b>"]
+
+    F -->|"cues flagged<br/>NEEDS_VISION"| G["Vision follow-up<br/><b>1 call per flagged cue</b><br/>sees only: its own text guess<br/>+ frames at that timestamp"]
+    F -->|"text-only decided fixes"| CC["Confirmed fixes<br/><i>you review/exclude before applying</i>"]
+    G --> CC
+
+    CC --> R[Transcript after rationality + vision fixes]
+
+    R --> V{{"Transcript review<br/><i>human edit, no LLM</i><br/>skippable"}}
+    V --> R2[Final transcript]
+
+    subgraph SG2[" "]
+        direction LR
+        N[("Confirmed-fix notes")] -.->|"only notes overlapping<br/>that batch's cue range"| H["Translation<br/><b>1 call per 40-cue batch</b>"]
+    end
+    CC --> N
+    R2 --> H
+
+    D -->|"FULL transcript text<br/>+ N sampled frames"| E["Context primer<br/><b>1 call, total</b>"]
+    E --> P[("Primer text<br/>(characters/setting/tone)")]
+    P -.->|"prepended to every batch"| F
+    P -.->|"prepended to every batch"| H
+
+    H --> Z[Translated .srt]
+
+    style SG2 fill:transparent,stroke:transparent
+```
+
+| Stage | # of calls | Sees | Never sees |
+|---|---|---|---|
+| Repeat resolution | 1, total | only the flagged repeat/character-run snippets | the rest of the transcript, the primer, video frames |
+| Context primer | 1, total | the full transcript (after repeat fixes) + N sampled frames | anything (it runs first - nothing to carry forward yet) |
+| Rationality check | 1 per 40-cue batch | the primer + that batch's 40 cues (after repeat fixes) | other batches, video frames (text-only pass), repeat-resolution's decisions |
+| Vision follow-up | 1 per flagged cue | only that cue's own issue/guess + frames from that exact moment | the primer, surrounding cues, any other flagged cue |
+| Transcript review | 1 pause, total | the full transcript, after every automated fix (not an LLM call - a human edit) | - |
+| Translation | 1 per 40-cue batch | the primer + notes relevant to that batch's cue range + that batch's 40 cues, **after every prior fix including any manual edit** | other batches' cues, or how they were translated |
+
+Practical implication: the context primer and any notes are the *only* thread tying the
+whole run together. A garbled fix in one rationality-check batch has no way to influence
+another batch's output (good - it can't cascade), but it also means each batch judges
+plausibility from its own 40 lines plus the primer alone, not the full transcript.
 
 There's also an optional alternate VAD (voice-activity-detection) front end
 ([TEN VAD](https://github.com/TEN-framework/ten-vad)) that trims silence and detects
