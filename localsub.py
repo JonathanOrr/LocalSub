@@ -22,10 +22,14 @@ def _reference_frame(s: str) -> tuple[float, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Transcribe + translate a foreign-language video and mux "
-        "both subtitle tracks into an .mkv."
+        description="Transcribe + translate a foreign-language video (or audio file) and "
+        "mux both subtitle tracks into an .mkv - or, for audio-only input, just write out "
+        "the .srt file(s) directly, since there's no video to mux into."
     )
-    parser.add_argument("video", type=Path, help="input video file")
+    parser.add_argument("video", type=Path,
+                         help="input video file, or a bare audio file (mp3/wav/m4a/etc.) - "
+                              "audio-only input skips the final mux step and produces .srt "
+                              "file(s) as the final output instead")
     parser.add_argument("--lang", default="ja", help="source spoken language (default: ja)")
     parser.add_argument("--model", default="large-v3", help="whisper.cpp model name (default: large-v3)")
     parser.add_argument("--engine", choices=["whisper", "llm"], default="whisper",
@@ -151,7 +155,10 @@ def main() -> None:
     })
     result = run_pipeline(args.video, config)
 
-    print(f"\nDone: {result.output_path}")
+    if result.output_path is not None:
+        print(f"\nDone: {result.output_path}")
+    else:
+        print("\nDone (audio-only input - no muxed file, subtitle files below):")
     print(f"  Source subtitles ({result.lang}): {result.src_srt}")
     if result.target_srt is not None:
         print(f"  {language_info(result.target_lang)[1]} subtitles: {result.target_srt}")

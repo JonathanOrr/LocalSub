@@ -7,6 +7,10 @@ works on AMD/Intel/NVIDIA, not just CUDA) for transcription, with an optional lo
 quality-check and translation pipeline on top (via [LM Studio](https://lmstudio.ai) or any
 other OpenAI-compatible local server).
 
+Bare audio files (mp3/wav/m4a/flac/etc.) work too - the same pipeline runs, just without
+a final mux step (there's no video to mux subtitles into), so the `.srt` file(s) are the
+final output directly.
+
 ## What it does
 
 1. Extracts audio and transcribes it with whisper.cpp.
@@ -197,6 +201,13 @@ Non-interactive/background run (accepts all LLM-proposed fixes without prompting
 
 ```
 python3 localsub.py your_video.mp4 --lang ja --engine llm --auto-confirm
+```
+
+Transcribe a bare audio file - same flags as video, just no muxed output at the end
+(the `.srt` file(s) are the final result):
+
+```
+python3 localsub.py your_podcast.mp3 --lang en --no-translate
 ```
 
 Use the alternate TEN VAD engine (trims silence and preserves sentence boundaries more

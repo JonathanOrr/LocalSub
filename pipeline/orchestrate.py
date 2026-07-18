@@ -20,6 +20,11 @@ ConfirmTranscriptFn = Callable[[Path, bool], None]
 ConfirmPrimerFramesFn = Callable[[list[tuple[float, str]], bool], list[tuple[float, str]]]
 StageFn = Callable[[str], None]
 
+# Extension-based, same style as webapp/app.py's VIDEO_EXTENSIONS - not stream-probed.
+# Audio-only input skips the final mux stage entirely (nothing to mux subtitles into);
+# see run_pipeline's is_audio_only check below.
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wma"}
+
 
 @dataclass
 class PipelineConfig:
@@ -87,7 +92,9 @@ def confirm_primer_frames(frames: list[tuple[float, str]], auto_confirm: bool) -
 
 @dataclass
 class PipelineResult:
-    output_path: Path
+    # None for audio-only input - there's no video to mux subtitles into, so the .srt
+    # files below are the final deliverable as-is.
+    output_path: Path | None
     src_srt: Path
     target_srt: Path | None
     lang: str
@@ -125,6 +132,13 @@ def run_pipeline(
     video_path = video_path.resolve()
     if not video_path.exists():
         sys.exit(f"input video not found: {video_path}")
+    is_audio_only = video_path.suffix.lower() in AUDIO_EXTENSIONS
+    # Vision needs actual video frames, which audio-only input has none of - every
+    # frame-extraction attempt against it would just fail and fall back on its own (see
+    # pipeline.video_frames), but treating it as an explicit --no-llm-vision here skips
+    # those doomed ffmpeg calls outright and keeps the web UI's primer-frame review from
+    # popping up a screen full of broken image previews for a run that has none to show.
+    no_llm_vision = config.no_llm_vision or is_audio_only
 
     workdir = (config.workdir or video_path.parent).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -173,7 +187,7 @@ def run_pipeline(
     context_primer: str | None = None
     if not config.no_llm_check:
         # disabling vision means no images anywhere, including user-pinned reference frames
-        reference_frames = [] if config.no_llm_vision else _normalize_reference_frames(config.reference_frames)
+        reference_frames = [] if no_llm_vision else _normalize_reference_frames(config.reference_frames)
 
         stage_fn("repeats")
         repeats = detect_repeats(src_srt, config.flag_repeat_count)
@@ -199,7 +213,7 @@ def run_pipeline(
             # frame labeled during this review (whether it started blank or was relabeled)
             # also becomes a reference frame for every later vision follow-up call.
             stage_fn("primer_frames")
-            primer_frame_count = 0 if config.no_llm_vision else config.context_primer_frames
+            primer_frame_count = 0 if no_llm_vision else config.context_primer_frames
             default_frames = default_primer_frame_plan(parse_srt_cues(src_srt), primer_frame_count)
             confirmed_default_frames = confirm_primer_frames_fn(default_frames, config.auto_confirm)
             primer_frames = confirmed_default_frames + reference_frames
@@ -222,8 +236,8 @@ def run_pipeline(
             raw_log_path=out_dir / f"{src_srt.stem}.llm_rationality.md",
             context_primer=context_primer,
         )
-        need_vision = [f for f in flags if f.needs_vision and not config.no_llm_vision]
-        text_only = [f for f in flags if not (f.needs_vision and not config.no_llm_vision)]
+        need_vision = [f for f in flags if f.needs_vision and not no_llm_vision]
+        text_only = [f for f in flags if not (f.needs_vision and not no_llm_vision)]
 
         vision_changes = []
         if need_vision:
@@ -300,8 +314,12 @@ def run_pipeline(
                 remap_srt_timestamps(target_srt, trim_map)
 
     stage_fn("mux")
-    output_path = out_dir / f"{video_path.stem}.output.mkv"
-    mux(video_path, src_srt, config.lang, target_srt, config.target_lang, output_path, log_fn=log_fn)
+    if is_audio_only:
+        log_fn("  Audio-only input - skipping mux, the subtitle file(s) above are the final output")
+        output_path = None
+    else:
+        output_path = out_dir / f"{video_path.stem}.output.mkv"
+        mux(video_path, src_srt, config.lang, target_srt, config.target_lang, output_path, log_fn=log_fn)
 
     return PipelineResult(
         output_path=output_path, src_srt=src_srt, target_srt=target_srt,
