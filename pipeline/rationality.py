@@ -106,14 +106,22 @@ LLM_VISION_REASON_RE = re.compile(r"REASON:\s*(.*?)\s*$", re.IGNORECASE | re.DOT
 def llm_vision_resolve(
     flags: list[RationalityFlag], cues: list[tuple[str, str, str]], video_path: Path,
     endpoint: str, model: str, raw_log_path: Path | None = None,
+    context_primer: str | None = None,
 ) -> list[ProposedChange]:
     """Only called for the RationalityFlags that asked for vision - pulls frames and lets
-    the model confirm/improve its own text-only guess."""
+    the model confirm/improve its own text-only guess. Unlike the rationality-check and
+    translation passes, this one otherwise has zero sense of the broader video (who's
+    speaking, established names/setting) - just one flagged line, its guess, and a few
+    frames from that exact second - so the primer is worth the extra per-call tokens here."""
     if not flags:
         return []
     cue_by_num = {int(num): (ts, text) for num, ts, text in cues}
     if raw_log_path is not None:
         raw_log_path.write_text("# LLM vision-resolve log\n\n")
+    primer_section = (
+        f"\n\nContext on the video (best-effort, may be incomplete - use as a hint, not fact):\n"
+        f"{context_primer}\n" if context_primer else ""
+    )
 
     changes = []
     for f in flags:
@@ -131,7 +139,7 @@ def llm_vision_resolve(
             content: list[dict] = [{
                 "type": "text",
                 "text": f"{LLM_VISION_PROMPT}\n\nFlagged: [{f.first_cue}-{f.last_cue}] {f.issue}\n"
-                        f"Text-only guess: {f.proposed_fix!r}",
+                        f"Text-only guess: {f.proposed_fix!r}" + primer_section,
             }]
             for b64 in frames:
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})

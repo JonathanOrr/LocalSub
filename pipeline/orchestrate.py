@@ -171,6 +171,7 @@ def run_pipeline(
             vision_changes = llm_vision_resolve(
                 need_vision, cues, video_path, config.llm_endpoint, config.llm_model,
                 raw_log_path=out_dir / f"{src_srt.stem}.llm_vision.md",
+                context_primer=context_primer,
             )
         cue_by_num = {int(num): ts for num, ts, text in cues}
         text_changes = []

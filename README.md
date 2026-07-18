@@ -59,7 +59,8 @@ flowchart TD
     D -->|"40 cues per call<br/>batches don't see each other"| F["Rationality check<br/><b>1 call per 40-cue batch</b>"]
     P -.->|"prepended to every batch"| F
 
-    F -->|"cues flagged<br/>NEEDS_VISION"| G["Vision follow-up<br/><b>1 call per flagged cue</b><br/>sees only: its own text guess<br/>+ frames at that timestamp"]
+    F -->|"cues flagged<br/>NEEDS_VISION"| G["Vision follow-up<br/><b>1 call per flagged cue</b><br/>sees: its own text guess<br/>+ frames at that timestamp"]
+    P -.->|"prepended to every call"| G
     F -->|"text-only decided fixes"| CC["Confirmed fixes<br/><i>you review/exclude before applying</i>"]
     G --> CC
 
@@ -81,7 +82,7 @@ flowchart TD
 | Repeat resolution | 1, total | only the flagged repeat/character-run snippets | the rest of the transcript, the primer, video frames |
 | Context primer | 1, total | the full transcript (after repeat fixes) + N sampled frames | anything (it runs first - nothing to carry forward yet) |
 | Rationality check | 1 per 40-cue batch | the primer + that batch's 40 cues (after repeat fixes) | other batches, video frames (text-only pass), repeat-resolution's decisions |
-| Vision follow-up | 1 per flagged cue | only that cue's own issue/guess + frames from that exact moment | the primer, surrounding cues, any other flagged cue |
+| Vision follow-up | 1 per flagged cue | the primer + that cue's own issue/guess + frames from that exact moment | surrounding cues, any other flagged cue |
 | Transcript review | 1 pause, total | the full transcript, after every automated fix (not an LLM call - a human edit) | - |
 | Translation | 1 per 40-cue batch | the primer + notes relevant to that batch's cue range + that batch's 40 cues, **after every prior fix including any manual edit** | other batches' cues, or how they were translated |
 
