@@ -44,10 +44,16 @@ else
 fi
 
 echo "==> Installing Python dependencies (Flask, for the optional web UI)..."
-pip3 install --user -r "$SCRIPT_DIR/requirements.txt"
+# --break-system-packages: this is a deliberate --user install into the system
+# interpreter (see localsub.py's own docs on why - the vibe-search project's
+# pipeline.py invokes it with /usr/bin/python3 explicitly, not a venv), which
+# PEP 668 blocks by default on newer distros unless overridden.
+pip3 install --user --break-system-packages -r "$SCRIPT_DIR/requirements.txt"
 
 echo "==> Installing ten-vad (optional, only needed for --vad-engine ten)..."
-pip3 install --user ten-vad || echo "  [WARNING] pip install ten-vad failed - --vad-engine ten won't work until this is resolved"
+# numpy: ten-vad imports it at runtime but doesn't declare it as a dependency
+# in its own package metadata, so pip won't pull it in automatically.
+pip3 install --user --break-system-packages numpy ten-vad || echo "  [WARNING] pip install ten-vad failed - --vad-engine ten won't work until this is resolved"
 
 # ten-vad's native library needs libc++ (LLVM's C++ runtime); most distros ship GCC's
 # libstdc++ by default and don't have this installed.
