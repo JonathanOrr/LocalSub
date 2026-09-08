@@ -69,6 +69,31 @@ remembering when you add a field (learned adding `gpu`):
 - **`PIPELINE_STAGES` in `app.js` is duplicated by hand** from the `stage_fn(...)` calls in
   `orchestrate.py` (see `CONTRIBUTING.md`) — keep in sync if a stage call is added/renamed.
 
+## Voice-clone dub (`PipelineConfig.tts_dub`): its own venv, invoked as a subprocess
+
+Same reasoning as whisper.cpp being an external pinned binary rather than a Python binding:
+torch + qwen-tts (ROCm build on this machine, see `amd_instructions/` / `pytorch_instructions/`)
+are large and GPU-vendor-specific, so they're **not** installed into the system Python
+`webui.py`/`localsub.py` run under (`setup.sh` never touches them). They live in their own
+`.venv` at the repo root instead, and `pipeline/tts_dub.py` drives `pipeline/tts_worker.py`
+as a subprocess under `.venv/bin/python -m pipeline.tts_worker` (`cwd=`repo root so the `-m`
+import resolves), the same `run_streamed()` helper whisper-cli/ffmpeg use. If `.venv` is
+missing, the stage `sys.exit`s with setup pointers rather than crashing obscurely - see
+`check_tts_dependencies()`.
+
+**Hallucination-loop quirk found via real testing (2026-09-09):** a single
+`generate_voice_clone(text=[...])` call across every subtitle line let one degenerate,
+punctuation-only line ("...feels so good.") run away to the full 2048-token generation cap
+- decoded to **655 seconds** of audio - while every *other* line in that same batched call
+terminated normally. Root cause looked like a per-sample stop-token miss that only surfaces
+under batching. Fix in `pipeline/tts_worker.py`: generate one line at a time (isolates each
+line's own stopping behavior, and shrinks peak VRAM enough to also stop the OOM-retry churn
+the runaway line was causing), plus a calibration-free backstop - each decoded line is
+hard-truncated to a duration cap derived from its own cue spacing (`next cue start - this
+cue start`, times 4, floored at 8s, ceilinged at 45s) before being placed on the timeline.
+The truncation cap is intentionally generous (real dubbed speech often runs longer than the
+original language's timing) - it's a runaway-generation backstop, not a pacing constraint.
+
 ## The LLM half (distinct from the whisper half)
 
 The repeat-resolution / context-primer / rationality / vision / translation stages call an

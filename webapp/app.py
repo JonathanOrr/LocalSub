@@ -8,9 +8,10 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig
+from pipeline.srt_utils import derive_ref_text, parse_srt_cues
 from pipeline.vad_ten import detect_raw_speech_runs
 from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio, list_gpus
-from webapp.runner import JOBS, cancel_job, start_job, submit_confirm
+from webapp.runner import JOBS, cancel_job, start_job, start_redub_job, submit_confirm
 
 app = Flask(__name__)
 
@@ -124,6 +125,91 @@ def video_file():
     if not video_path.exists():
         return jsonify({"error": f"video not found: {video_path}"}), 400
     return send_file(video_path, conditional=True)
+
+
+@app.route("/api/dub_audio")
+def dub_audio_file():
+    """Serve a generated voice-clone dub track (see PipelineConfig.tts_dub), Range-request
+    aware like /api/video, so the post-run preview can offer an <audio> player for it."""
+    raw_path = request.args.get("path", "")
+    audio_path = Path(raw_path)
+    if not audio_path.exists():
+        return jsonify({"error": f"audio not found: {audio_path}"}), 400
+    return send_file(audio_path, conditional=True)
+
+
+@app.route("/api/tts_ref_text")
+def tts_ref_text_preview():
+    """Best-effort auto-derived reference text for a voice-clone dub's reference clip - what
+    pipeline.tts_worker would compute on its own if PipelineConfig.tts_dub_ref_text is left
+    blank - exposed so the "Auto-fill" control in the web UI's TTS panel can hand the user a
+    starting point to hand-correct instead of transcribing the clip from scratch. Only works
+    if this video already has its own <lang> SRT on disk from a previous run (same file
+    pipeline.orchestrate.run_pipeline itself writes) - if not, that's reported as an error the
+    frontend shows inline, not a 500."""
+    raw_path = request.args.get("video_path", "")
+    lang = request.args.get("lang", "ja")
+    try:
+        ref_start = float(request.args.get("ref_start", 0))
+        ref_seconds = float(request.args.get("ref_seconds", 8))
+    except ValueError:
+        return jsonify({"error": "ref_start/ref_seconds must be numbers"}), 400
+
+    video_path = Path(raw_path)
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+    workdir_raw = request.args.get("workdir", "")
+    workdir = Path(workdir_raw).resolve() if workdir_raw else video_path.parent
+    out_dir = workdir / video_path.stem
+    src_srt = out_dir / f"{video_path.stem}.{lang}.srt"
+    if not src_srt.exists():
+        return jsonify({
+            "error": f"no existing transcript at {src_srt} - run the pipeline once first, "
+                     f"or type your own reference text",
+        }), 400
+
+    cues = parse_srt_cues(src_srt)
+    text = derive_ref_text(cues, ref_start, ref_seconds)
+    return jsonify({"text": text})
+
+
+@app.route("/api/jobs/redub", methods=["POST"])
+def create_redub_job():
+    """Re-run just the voice-clone dub (+ remux) against files an earlier full run already
+    produced, without repeating transcription/translation - see webapp.runner.start_redub_job
+    and pipeline.orchestrate.redo_voice_dub. Derives wav_path/src_srt/target_srt/out_dir from
+    video_path+lang+target_lang the exact same way run_pipeline lays them out, so this works
+    for any video that's been through a full run before, not just ones with a live Job still
+    in memory (JOBS is server-process-lifetime only)."""
+    data = request.get_json(force=True)
+    video_path = Path(data["video_path"]).resolve()
+    if not video_path.exists():
+        return jsonify({"error": f"video not found: {video_path}"}), 400
+    lang = data.get("lang", "ja")
+    target_lang = data.get("target_lang", "en")
+    workdir = Path(data["workdir"]).resolve() if data.get("workdir") else video_path.parent
+    out_dir = workdir / video_path.stem
+    wav_path = out_dir / f"{video_path.stem}.wav"
+    src_srt = out_dir / f"{video_path.stem}.{lang}.srt"
+    target_srt = out_dir / f"{video_path.stem}.{target_lang}.srt"
+    is_audio_only = video_path.suffix.lower() in AUDIO_EXTENSIONS
+
+    missing = [str(p) for p in (wav_path, src_srt, target_srt) if not p.exists()]
+    if missing:
+        return jsonify({
+            "error": "missing file(s), run the full pipeline once first (with translation "
+                     "enabled): " + ", ".join(missing),
+        }), 400
+
+    job_id = start_redub_job(
+        video_path, wav_path, src_srt, target_srt, lang, target_lang, out_dir, is_audio_only,
+        tts_dub_model=data.get("tts_dub_model") or PipelineConfig.tts_dub_model,
+        tts_dub_ref_seconds=float(data.get("tts_dub_ref_seconds") or PipelineConfig.tts_dub_ref_seconds),
+        tts_dub_ref_start=float(data.get("tts_dub_ref_start") or 0.0),
+        tts_dub_ref_text=data.get("tts_dub_ref_text") or "",
+        max_lines=int(data.get("max_lines") or 0),
+    )
+    return jsonify({"job_id": job_id})
 
 
 @app.route("/api/frame_preview")

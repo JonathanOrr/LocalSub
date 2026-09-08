@@ -9,7 +9,7 @@ from typing import Callable
 from pipeline.errors import JobCancelled
 
 # How often should_cancel() gets polled while a subprocess is otherwise silent - see
-# _run_streamed. whisper-cli in particular can go silent for several seconds at a time
+# run_streamed. whisper-cli in particular can go silent for several seconds at a time
 # (model load, then however long a single chunk takes to decode) with zero output lines in
 # between, so checking cancellation only between lines isn't actually responsive - it would
 # only take effect whenever the next line happens to arrive, which could be a long wait.
@@ -206,9 +206,9 @@ def list_gpus() -> list[tuple[str, str]]:
     ]
 
 
-def _run_streamed(
+def run_streamed(
     cmd: list[str], log_fn: Callable[[str], None], should_cancel: Callable[[], bool] = lambda: False,
-    env: dict | None = None,
+    env: dict | None = None, cwd: Path | None = None,
 ) -> None:
     """Run cmd, forwarding its stdout/stderr line-by-line to log_fn as it runs (instead of
     subprocess.run's default of just inheriting the parent's stdio) - needed so a caller
@@ -221,8 +221,14 @@ def _run_streamed(
     stretch. On a hit, the process is killed outright and JobCancelled is raised, giving the
     web UI's Cancel button a genuinely prompt effect regardless of the subprocess's own
     output cadence. env, when given, is passed to Popen as the subprocess's environment
-    (e.g. to pin a specific GPU via GGML_VK_VISIBLE_DEVICES); None inherits the parent's."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    (e.g. to pin a specific GPU via GGML_VK_VISIBLE_DEVICES); None inherits the parent's.
+    cwd, when given, sets the subprocess's working directory (e.g. so a `-m pkg.module`
+    invocation under a different venv resolves the package from the repo root). Public (no
+    leading underscore) since pipeline/tts_dub.py reuses this for its own subprocess - a
+    generically useful helper, not whisper-specific despite living in this module."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env, cwd=cwd,
+    )
     assert proc.stdout is not None  # guaranteed by stdout=subprocess.PIPE above
     stdout = proc.stdout
     while True:
@@ -251,7 +257,7 @@ def extract_audio(
 ) -> Path:
     wav_path = workdir / f"{video_path.stem}.wav"
     log_fn(f"[1/4] Extracting audio -> {wav_path}")
-    _run_streamed(
+    run_streamed(
         [
             "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path),
@@ -293,28 +299,40 @@ def transcribe(
     if use_gpu and gpu:
         env = dict(os.environ, GGML_VK_VISIBLE_DEVICES=gpu)
         log_fn(f"  Pinning whisper to Vulkan device(s): {gpu}")
-    _run_streamed(cmd, log_fn, should_cancel, env=env)
+    run_streamed(cmd, log_fn, should_cancel, env=env)
     return Path(f"{out_stem}.srt")
 
 
 def mux(
     video_path: Path, src_srt: Path, src_lang: str, target_srt: Path | None, target_lang: str,
     output_path: Path, log_fn: Callable[[str], None] = print,
-    should_cancel: Callable[[], bool] = lambda: False,
+    should_cancel: Callable[[], bool] = lambda: False, dub_audio_path: Path | None = None,
 ) -> None:
+    """dub_audio_path, when given (see pipeline/tts_dub.py), is muxed in as a second audio
+    track alongside the original - not a replacement - so either can be picked in a player
+    that supports audio-track selection. It's re-encoded to AAC (it arrives as a WAV) while
+    the original audio and video stay stream-copied untouched."""
     log_fn(f"[mux] Muxing subtitles -> {output_path}")
     src_tag, src_title = language_info(src_lang)
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path), "-i", str(src_srt)]
+    maps = ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
+    next_input = 2
+    sub_meta = ["-metadata:s:s:0", f"language={src_tag}", "-metadata:s:s:0", f"title={src_title}"]
     if target_srt is not None:
-        cmd += ["-i", str(target_srt), "-map", "0:v", "-map", "0:a", "-map", "1:0", "-map", "2:0"]
-    else:
-        cmd += ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
-    cmd += [
-        "-c:v", "copy", "-c:a", "copy", "-c:s", "srt",
-        "-metadata:s:s:0", f"language={src_tag}", "-metadata:s:s:0", f"title={src_title}",
-    ]
-    if target_srt is not None:
+        cmd += ["-i", str(target_srt)]
+        maps += ["-map", f"{next_input}:0"]
         target_tag, target_title = language_info(target_lang)
-        cmd += ["-metadata:s:s:1", f"language={target_tag}", "-metadata:s:s:1", f"title={target_title}"]
+        sub_meta += ["-metadata:s:s:1", f"language={target_tag}", "-metadata:s:s:1", f"title={target_title}"]
+        next_input += 1
+    audio_codec = ["-c:a:0", "copy"]
+    audio_meta = []
+    if dub_audio_path is not None:
+        cmd += ["-i", str(dub_audio_path)]
+        maps += ["-map", f"{next_input}:a"]
+        dub_tag, dub_title = language_info(target_lang)
+        audio_codec += ["-c:a:1", "aac", "-b:a:1", "192k"]
+        audio_meta += ["-metadata:s:a:1", f"language={dub_tag}", "-metadata:s:a:1", f"title={dub_title} (AI dub)"]
+        next_input += 1
+    cmd += maps + ["-c:v", "copy"] + audio_codec + ["-c:s", "srt"] + sub_meta + audio_meta
     cmd.append(str(output_path))
-    _run_streamed(cmd, log_fn, should_cancel)
+    run_streamed(cmd, log_fn, should_cancel)

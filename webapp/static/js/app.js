@@ -11,7 +11,7 @@
 // ===== SECTION: Form / payload =====
 const BOOL_FIELDS = [
   "no_translate", "no_gpu", "vad", "no_llm_check", "no_llm_vision",
-  "no_context_primer", "no_transcript_review", "auto_confirm",
+  "no_context_primer", "no_transcript_review", "auto_confirm", "tts_dub",
 ];
 const INT_FIELDS = [
   "threads", "max_context", "flag_repeat_count", "vad_min_speech_ms",
@@ -19,9 +19,11 @@ const INT_FIELDS = [
 ];
 const FLOAT_FIELDS = [
   "vad_max_speech_s", "vad_threshold", "entropy_thold", "logprob_thold", "no_speech_thold",
+  "tts_dub_ref_seconds", "tts_dub_ref_start",
 ];
 const STR_FIELDS = [
   "lang", "target_lang", "engine", "model", "vad_engine", "llm_endpoint", "llm_model",
+  "tts_dub_model", "tts_dub_ref_text",
 ];
 // Mirrors pipeline/orchestrate.py's AUDIO_EXTENSIONS - keep in sync by hand (same caveat
 // as PIPELINE_STAGES below, see CONTRIBUTING.md).
@@ -53,6 +55,8 @@ const outputPreviewDesc = document.getElementById("outputPreviewDesc");
 const outputPreviewVideo = document.getElementById("outputPreviewVideo");
 const outputPreviewSrcTrack = document.getElementById("outputPreviewSrcTrack");
 const outputPreviewTgtTrack = document.getElementById("outputPreviewTgtTrack");
+const dubPreviewArea = document.getElementById("dubPreviewArea");
+const dubPreviewAudio = document.getElementById("dubPreviewAudio");
 
 function loadBrowse(path) {
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
@@ -238,6 +242,7 @@ const PIPELINE_STAGES = [
   { id: "vision", label: "Vision follow-up", skipIf: (c) => c.no_llm_check || c.no_llm_vision },
   { id: "transcript_review", label: "Transcript review", skipIf: (c) => c.no_transcript_review },
   { id: "translate", label: "Translate", skipIf: (c) => c.no_translate },
+  { id: "tts_dub", label: "Voice-clone dub", skipIf: (c) => !c.tts_dub || c.no_translate },
   { id: "mux", label: "Mux output", skipIf: (c) => c.is_audio_only },
 ];
 let stageStates = {};
@@ -321,6 +326,13 @@ function showOutputPreview(result) {
   } else {
     outputPreviewTgtTrack.removeAttribute("src");
   }
+  if (result.dub_audio) {
+    dubPreviewAudio.src = `/api/dub_audio?path=${encodeURIComponent(result.dub_audio)}`;
+    dubPreviewArea.style.display = "block";
+  } else {
+    dubPreviewArea.style.display = "none";
+    dubPreviewAudio.removeAttribute("src");
+  }
   outputPreviewArea.style.display = "block";
 }
 
@@ -330,6 +342,8 @@ function hideOutputPreview() {
   outputPreviewSrcTrack.removeAttribute("src");
   outputPreviewTgtTrack.removeAttribute("src");
   outputPreviewVideo.load();
+  dubPreviewArea.style.display = "none";
+  dubPreviewAudio.removeAttribute("src");
 }
 
 // ===== SECTION: Recent jobs =====
@@ -1149,4 +1163,193 @@ refFrameAddBtn.addEventListener("click", () => {
   refFramePreviewImg.style.display = "none";
   refFrameAddBtn.disabled = true;
   refFrameStatus.textContent = "";
+});
+
+// ===== SECTION: Voice-clone dub controls =====
+// Three controls in the "Voice-clone dub (TTS)" panel, none of which drive the main
+// job/stage machinery above - they act directly on files a previous full run already left
+// on disk (or, for the reference-clip preview, just the raw source file), so a user can dial
+// in the reference clip/text and audition the result without starting (or having already
+// started) a full pipeline run in this browser tab.
+const ttsRefStartInput = document.getElementById("tts_dub_ref_start");
+const ttsRefSecondsInput = document.getElementById("tts_dub_ref_seconds");
+const ttsRefTextArea = document.getElementById("tts_dub_ref_text");
+const ttsRefPreviewBtn = document.getElementById("ttsRefPreviewBtn");
+const ttsRefPreviewStatus = document.getElementById("ttsRefPreviewStatus");
+const ttsRefPreviewAudio = document.getElementById("ttsRefPreviewAudio");
+const ttsAutoFillBtn = document.getElementById("ttsAutoFillBtn");
+const ttsAutoFillStatus = document.getElementById("ttsAutoFillStatus");
+const redubMaxLines = document.getElementById("redubMaxLines");
+const redubBtn = document.getElementById("redubBtn");
+const redubCancelBtn = document.getElementById("redubCancelBtn");
+const redubStatus = document.getElementById("redubStatus");
+const redubLog = document.getElementById("redubLog");
+const redubAudioPreview = document.getElementById("redubAudioPreview");
+const redubOutputNote = document.getElementById("redubOutputNote");
+
+// --- Preview the reference clip: exactly the slice tts_worker.py would slice, played back
+// via the existing /api/audio_clip (already used by the VAD diagram's click-to-play) so no
+// new extraction endpoint is needed.
+ttsRefPreviewBtn.addEventListener("click", () => {
+  const videoPath = videoPathInput.value.trim();
+  if (!videoPath) {
+    ttsRefPreviewStatus.textContent = "Enter a video/audio path above first.";
+    return;
+  }
+  const start = parseFloat(ttsRefStartInput.value) || 0;
+  const seconds = parseFloat(ttsRefSecondsInput.value) || 8;
+  ttsRefPreviewStatus.textContent = "Extracting...";
+  ttsRefPreviewBtn.disabled = true;
+  fetch(`/api/audio_clip?path=${encodeURIComponent(videoPath)}&start=${start}&end=${start + seconds}`)
+    .then((r) => (r.ok ? r.blob() : r.json().then((j) => Promise.reject(new Error(j.error || "failed")))))
+    .then((blob) => {
+      ttsRefPreviewAudio.src = URL.createObjectURL(blob);
+      ttsRefPreviewAudio.style.display = "block";
+      ttsRefPreviewAudio.play();
+      ttsRefPreviewStatus.textContent = "";
+    })
+    .catch((err) => {
+      ttsRefPreviewStatus.textContent = `Error: ${err.message}`;
+    })
+    .finally(() => {
+      ttsRefPreviewBtn.disabled = false;
+    });
+});
+
+// --- Auto-fill the ground-truth reference text from an existing transcript (if this video's
+// been through a full run before), as a starting point the user then hand-corrects against
+// what they just heard in the preview above - see /api/tts_ref_text.
+ttsAutoFillBtn.addEventListener("click", () => {
+  const videoPath = videoPathInput.value.trim();
+  if (!videoPath) {
+    ttsAutoFillStatus.textContent = "Enter a video/audio path above first.";
+    return;
+  }
+  const params = new URLSearchParams({
+    video_path: videoPath,
+    lang: form.querySelector('[name="lang"]').value,
+    ref_start: parseFloat(ttsRefStartInput.value) || 0,
+    ref_seconds: parseFloat(ttsRefSecondsInput.value) || 8,
+  });
+  const workdir = form.querySelector('[name="workdir"]').value;
+  if (workdir) params.set("workdir", workdir);
+  ttsAutoFillStatus.textContent = "Looking up existing transcript...";
+  ttsAutoFillBtn.disabled = true;
+  fetch(`/api/tts_ref_text?${params.toString()}`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        ttsAutoFillStatus.textContent = data.error;
+        return;
+      }
+      ttsRefTextArea.value = data.text || "";
+      ttsAutoFillStatus.textContent = "Filled in - review/correct it against the clip preview above.";
+    })
+    .catch(() => {
+      ttsAutoFillStatus.textContent = "Error looking up the transcript.";
+    })
+    .finally(() => {
+      ttsAutoFillBtn.disabled = false;
+    });
+});
+
+// --- Regenerate just the dub (+ remux) against an existing transcript/translation, without
+// touching the main job/stage checklist above - its own tiny log + audio preview instead,
+// fed by the same generic Job/SSE machinery (/api/jobs/<id>/events, /api/jobs/<id>/cancel)
+// the main run uses, just with a much simpler event handler since only 1-2 stages ever fire.
+let currentRedubJobId = null;
+let currentRedubEventSource = null;
+
+function appendRedubLog(line) {
+  const div = document.createElement("div");
+  if (/\[WARNING\]/.test(line)) div.style.color = "#ffca6a";
+  else if (/\[ERROR\]/i.test(line)) div.style.color = "#ff6b6b";
+  div.textContent = line;
+  redubLog.appendChild(div);
+  redubLog.scrollTop = redubLog.scrollHeight;
+}
+
+function setRedubActive(active) {
+  redubBtn.disabled = active;
+  redubCancelBtn.style.display = active ? "inline-block" : "none";
+}
+
+redubBtn.addEventListener("click", () => {
+  const videoPath = videoPathInput.value.trim();
+  if (!videoPath) {
+    redubStatus.textContent = "Enter a video/audio path above first.";
+    return;
+  }
+  const payload = {
+    video_path: videoPath,
+    lang: form.querySelector('[name="lang"]').value,
+    target_lang: form.querySelector('[name="target_lang"]').value,
+    workdir: form.querySelector('[name="workdir"]').value || null,
+    tts_dub_model: form.querySelector('[name="tts_dub_model"]').value,
+    tts_dub_ref_seconds: parseFloat(ttsRefSecondsInput.value) || 8,
+    tts_dub_ref_start: parseFloat(ttsRefStartInput.value) || 0,
+    tts_dub_ref_text: ttsRefTextArea.value,
+    max_lines: redubMaxLines.value ? parseInt(redubMaxLines.value, 10) : 0,
+  };
+  redubLog.replaceChildren();
+  redubLog.style.display = "block";
+  redubAudioPreview.style.display = "none";
+  redubAudioPreview.removeAttribute("src");
+  redubOutputNote.style.display = "none";
+  redubStatus.textContent = "Starting...";
+  setRedubActive(true);
+
+  fetch("/api/jobs/redub", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        redubStatus.textContent = `Error: ${data.error}`;
+        setRedubActive(false);
+        return;
+      }
+      currentRedubJobId = data.job_id;
+      redubStatus.textContent = "Running...";
+      if (currentRedubEventSource) currentRedubEventSource.close();
+      const es = new EventSource(`/api/jobs/${data.job_id}/events`);
+      es.onmessage = (msg) => {
+        const event = JSON.parse(msg.data);
+        if (event.type === "log") {
+          appendRedubLog(event.line);
+        } else if (event.type === "done") {
+          redubStatus.textContent = "Done.";
+          if (event.dub_audio) {
+            redubAudioPreview.src = `/api/dub_audio?path=${encodeURIComponent(event.dub_audio)}`;
+            redubAudioPreview.style.display = "block";
+          }
+          if (event.output_path) {
+            redubOutputNote.textContent = `Muxed into: ${event.output_path}`;
+            redubOutputNote.style.display = "block";
+          }
+          setRedubActive(false);
+          es.close();
+        } else if (event.type === "error") {
+          redubStatus.textContent = `Error: ${event.message}`;
+          setRedubActive(false);
+          es.close();
+        } else if (event.type === "cancelled") {
+          redubStatus.textContent = "Cancelled.";
+          setRedubActive(false);
+          es.close();
+        }
+      };
+      currentRedubEventSource = es;
+    })
+    .catch(() => {
+      redubStatus.textContent = "Error starting the job.";
+      setRedubActive(false);
+    });
+});
+
+redubCancelBtn.addEventListener("click", () => {
+  if (!currentRedubJobId) return;
+  fetch(`/api/jobs/${currentRedubJobId}/cancel`, { method: "POST" });
 });

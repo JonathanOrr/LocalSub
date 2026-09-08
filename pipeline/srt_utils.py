@@ -53,3 +53,21 @@ def write_srt(cues: list[tuple[str, str, str]], out_path: Path) -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         for num, ts, text in cues:
             f.write(f"{num}\n{ts}\n{text}\n\n")
+
+
+def derive_ref_text(cues: list[tuple[str, str, str]], ref_start: float, ref_seconds: float) -> str:
+    """Best-effort reference text for a voice-clone dub's reference clip: every cue whose
+    start time falls inside [ref_start, ref_start + ref_seconds). Falls back to the first cue
+    if none do (a reference clip that starts mid-cue, or before the first one). Shared by
+    pipeline/tts_worker.py (the actual auto-derivation, when the user hasn't typed their own
+    ground-truth text) and webapp/app.py's /api/tts_ref_text (the web UI's "Auto-fill" button,
+    a preview of the same thing for the user to hand-correct) - both need to agree on what
+    "auto" means, and this has zero dependencies so it's importable from either venv."""
+    ref_end = ref_start + ref_seconds
+    text = " ".join(
+        t for _, ts, t in cues
+        if ref_start <= srt_timestamp_range_to_seconds(ts)[0] < ref_end
+    )
+    if not text and cues:
+        text = cues[0][2]
+    return text

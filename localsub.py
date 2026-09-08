@@ -153,6 +153,31 @@ def main() -> None:
                          help="accept all LLM-proposed transcript fixes without an interactive "
                               "prompt (needed for non-interactive/background runs, which would "
                               "otherwise hang waiting for terminal input)")
+    parser.add_argument("--tts-dub", action="store_true",
+                         help="clone the speaker's voice from the source audio and speak the "
+                              "translated subtitles in it, timeline-aligned to their cue start "
+                              "times, then mux the result in as an extra audio track alongside "
+                              "the original. Needs a translated transcript (off if "
+                              "--no-translate is set) and its own venv with torch + qwen-tts "
+                              "installed (see amd_instructions/ and pytorch_instructions/); "
+                              "only supports a handful of target languages (see "
+                              "pipeline/tts_dub.py's TTS_LANGS) - unsupported/unmet cases are "
+                              "logged and skipped rather than failing the run")
+    parser.add_argument("--tts-dub-model", default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                         help="HF model id or local path for voice cloning (default: 0.6B-Base; "
+                              "swap in the 1.7B-Base variant for better quality if VRAM allows)")
+    parser.add_argument("--tts-dub-ref-seconds", type=float, default=8.0,
+                         help="length of the reference voice clip (default: 8)")
+    parser.add_argument("--tts-dub-ref-start", type=float, default=0.0,
+                         help="offset in seconds into the source audio where the reference "
+                              "clip starts (default: 0, the very start) - pick a cleaner "
+                              "moment if the opening has music/overlapping speech/silence")
+    parser.add_argument("--tts-dub-ref-text", default="",
+                         help="ground-truth transcript of the reference clip, typed by hand - "
+                              "overrides the default of auto-deriving it from the source "
+                              "subtitles that fall inside the clip. Clone quality is sensitive "
+                              "to this actually matching what's spoken, so a hand-verified "
+                              "transcript beats a possibly-imperfect automated one")
     args = parser.parse_args()
 
     config = PipelineConfig(**{
@@ -167,6 +192,8 @@ def main() -> None:
     print(f"  Source subtitles ({result.lang}): {result.src_srt}")
     if result.target_srt is not None:
         print(f"  {language_info(result.target_lang)[1]} subtitles: {result.target_srt}")
+    if result.dub_audio is not None:
+        print(f"  Voice-clone dub track: {result.dub_audio}")
 
 
 if __name__ == "__main__":

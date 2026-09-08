@@ -12,6 +12,7 @@ from pipeline.repeats import detect_char_repeats, detect_repeats, llm_resolve_re
 from pipeline.srt_utils import parse_srt_cues, write_srt
 from pipeline.transcript_review import confirm_transcript
 from pipeline.translate import llm_translate
+from pipeline.tts_dub import TTS_LANGS, generate_voice_dub
 from pipeline.vad_ten import build_vad_trimmed_wav, remap_srt_timestamps, ten_vad_speech_segments
 from pipeline.whisper_engine import check_dependencies, extract_audio, language_info, mux, transcribe
 
@@ -70,6 +71,22 @@ class PipelineConfig:
     reference_frames: list = field(default_factory=list)
     no_transcript_review: bool = False
     auto_confirm: bool = False
+    # Clone the speaker's voice from the source audio and speak the translated subtitles in
+    # it, timeline-aligned to their cue start times, then mux the result in as an extra
+    # audio track alongside the original (see pipeline/tts_dub.py). Off by default - needs
+    # its own venv (torch + qwen-tts) and only supports TTS_LANGS target languages; both
+    # cases are logged and skipped rather than failing the run when unmet.
+    tts_dub: bool = False
+    tts_dub_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    tts_dub_ref_seconds: float = 8.0
+    # Where in the source audio the reference clip is sliced from (default: the very start) -
+    # exposed so a clip that opens on silence/music/another speaker can be pointed elsewhere.
+    tts_dub_ref_start: float = 0.0
+    # Hand-typed ground-truth transcript of the reference clip. Empty (default) auto-derives
+    # it from the source-language SRT's cues that fall inside [ref_start, ref_start+ref_seconds)
+    # - see pipeline.srt_utils.derive_ref_text - but clone quality is sensitive to this text
+    # actually matching what's spoken, so a hand-verified one beats a possibly-off automated one.
+    tts_dub_ref_text: str = ""
 
 
 def _normalize_reference_frames(raw: list) -> list[tuple[float, str]]:
@@ -105,6 +122,9 @@ class PipelineResult:
     target_srt: Path | None
     lang: str
     target_lang: str
+    # None unless config.tts_dub was on AND it actually ran (needs a translated target_srt
+    # and a target_lang in TTS_LANGS) - see run_pipeline's tts_dub stage.
+    dub_audio: Path | None = None
 
 
 def run_pipeline(
@@ -333,6 +353,27 @@ def run_pipeline(
             if trim_map is not None:
                 remap_srt_timestamps(target_srt, trim_map)
 
+    dub_audio: Path | None = None
+    if config.tts_dub:
+        checked_stage("tts_dub")
+        if target_srt is None:
+            log_fn("  [WARNING] Voice-clone dub needs a translated transcript - skipping (translation is off)")
+        elif config.target_lang not in TTS_LANGS:
+            log_fn(
+                f"  [WARNING] Voice-clone dub doesn't support target language "
+                f"'{config.target_lang}' (supported: {', '.join(sorted(TTS_LANGS))}) - skipping"
+            )
+        else:
+            log_fn(f"  Cloning speaker voice and dubbing into {TTS_LANGS[config.target_lang]}...")
+            dub_result = generate_voice_dub(
+                wav_path, src_srt, target_srt, config.target_lang, video_path.stem, out_dir,
+                model=config.tts_dub_model, ref_seconds=config.tts_dub_ref_seconds,
+                ref_start=config.tts_dub_ref_start, ref_text=config.tts_dub_ref_text,
+                log_fn=log_fn, should_cancel=should_cancel,
+            )
+            dub_audio = dub_result.full_wav
+            log_fn(f"  Dub track: {dub_audio}")
+
     checked_stage("mux")
     if is_audio_only:
         log_fn("  Audio-only input - skipping mux, the subtitle file(s) above are the final output")
@@ -341,10 +382,65 @@ def run_pipeline(
         output_path = out_dir / f"{video_path.stem}.output.mkv"
         mux(
             video_path, src_srt, config.lang, target_srt, config.target_lang, output_path,
-            log_fn=log_fn, should_cancel=should_cancel,
+            log_fn=log_fn, should_cancel=should_cancel, dub_audio_path=dub_audio,
         )
 
     return PipelineResult(
         output_path=output_path, src_srt=src_srt, target_srt=target_srt,
-        lang=config.lang, target_lang=config.target_lang,
+        lang=config.lang, target_lang=config.target_lang, dub_audio=dub_audio,
     )
+
+
+def redo_voice_dub(
+    video_path: Path, wav_path: Path, src_srt: Path, target_srt: Path, lang: str, target_lang: str,
+    out_dir: Path, is_audio_only: bool, model: str, ref_seconds: float, ref_start: float, ref_text: str,
+    max_lines: int = 0, log_fn: Callable[[str], None] = print, stage_fn: StageFn = lambda stage: None,
+    should_cancel: Callable[[], bool] = lambda: False,
+) -> tuple[Path, Path | None]:
+    """Re-run just the voice-clone dub (and, for video input, the final mux) against an
+    already-completed run's own transcribe/translate output, instead of the whole
+    run_pipeline - so tuning the reference clip/text/model doesn't mean paying whisper's and
+    the LLM stages' cost again every time. Used by the web UI's "Regenerate dub" control (see
+    webapp/runner.py:start_redub_job and webapp/app.py's /api/jobs/redub, which derive
+    wav_path/src_srt/target_srt/out_dir from video_path+lang+target_lang the same way
+    run_pipeline itself lays them out). Returns (dub_audio, output_path); output_path is None
+    for audio-only input, same convention as PipelineResult.output_path. sys.exits (consistent
+    with check_dependencies elsewhere in this pipeline) if target_lang isn't supported or the
+    expected transcribe/translate output files aren't actually there yet."""
+    if target_lang not in TTS_LANGS:
+        sys.exit(
+            f"Voice-clone dub doesn't support target language '{target_lang}' "
+            f"(supported: {', '.join(sorted(TTS_LANGS))})"
+        )
+    missing = [str(p) for p in (wav_path, src_srt, target_srt) if not p.exists()]
+    if missing:
+        sys.exit(
+            "missing file(s), run the full pipeline once first (with translation enabled): "
+            + ", ".join(missing)
+        )
+
+    def checked_stage(name: str) -> None:
+        if should_cancel():
+            raise JobCancelled("cancelled by user")
+        stage_fn(name)
+
+    checked_stage("tts_dub")
+    log_fn(f"  Cloning speaker voice and dubbing into {TTS_LANGS[target_lang]}...")
+    dub_result = generate_voice_dub(
+        wav_path, src_srt, target_srt, target_lang, video_path.stem, out_dir,
+        model=model, ref_seconds=ref_seconds, ref_start=ref_start, ref_text=ref_text,
+        max_lines=max_lines, log_fn=log_fn, should_cancel=should_cancel,
+    )
+    dub_audio = dub_result.full_wav
+    log_fn(f"  Dub track: {dub_audio}")
+
+    output_path = None
+    if not is_audio_only:
+        checked_stage("mux")
+        output_path = out_dir / f"{video_path.stem}.output.mkv"
+        mux(
+            video_path, src_srt, lang, target_srt, target_lang, output_path,
+            log_fn=log_fn, should_cancel=should_cancel, dub_audio_path=dub_audio,
+        )
+
+    return dub_audio, output_path

@@ -8,7 +8,7 @@ from typing import Any
 
 from pipeline.changes import ProposedChange
 from pipeline.errors import JobCancelled
-from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig, run_pipeline
+from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig, redo_voice_dub, run_pipeline
 from pipeline.transcript_review import validate_and_renumber
 
 JOBS: dict[str, "Job"] = {}
@@ -207,6 +207,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
             "no_transcript_review": config.no_transcript_review,
             "no_translate": config.no_translate,
             "is_audio_only": is_audio_only,
+            "tts_dub": config.tts_dub,
         },
     )
     JOBS[job_id] = job
@@ -230,6 +231,7 @@ def start_job(video_path: Path, config: PipelineConfig) -> str:
                 "lang": result.lang,
                 "target_lang": result.target_lang,
                 "video_path": str(video_path),
+                "dub_audio": str(result.dub_audio) if result.dub_audio else None,
             }
             job.status = "done"
             job.emit({"type": "done", **job.result})
@@ -261,10 +263,54 @@ def cancel_job(job_id: str) -> bool:
     see pipeline/errors.py:JobCancelled and run_pipeline's should_cancel parameter for why:
     whisper-cli/ffmpeg get killed outright and a confirm pause wakes immediately, but a
     genuinely in-flight LLM HTTP call finishes on its own before the next checkpoint is
-    reached. Returns False if there's no job to cancel (missing, or already finished)."""
+    reached. Returns False if there's no job to cancel (missing, or already finished). Works
+    the same for a redub-only job from start_redub_job below - both are plain Job entries in
+    JOBS, cancel_job doesn't care which function is driving one."""
     job = JOBS.get(job_id)
     if job is None or job.status in ("done", "error", "cancelled"):
         return False
     job.cancel_event.set()
     job.confirm_event.set()  # wakes a paused confirm step, if any; harmless no-op otherwise
     return True
+
+
+def start_redub_job(
+    video_path: Path, wav_path: Path, src_srt: Path, target_srt: Path, lang: str, target_lang: str,
+    out_dir: Path, is_audio_only: bool, tts_dub_model: str, tts_dub_ref_seconds: float,
+    tts_dub_ref_start: float, tts_dub_ref_text: str, max_lines: int,
+) -> str:
+    """Re-run just the voice-clone dub (+ remux for video input) against an already-completed
+    run's own transcribe/translate output, without paying whisper's/the LLM stages' cost
+    again - see pipeline.orchestrate.redo_voice_dub. A plain Job like start_job's, just driven
+    by a much shorter function; the web UI's "Regenerate dub" control opens its own small log/
+    preview against this job's id rather than reusing the main run's stage checklist, since
+    only two of its stages ever apply here."""
+    job_id = uuid.uuid4().hex[:12]
+    job = Job(id=job_id, video_path=str(video_path), config_flags={"is_audio_only": is_audio_only})
+    JOBS[job_id] = job
+
+    def run() -> None:
+        try:
+            dub_audio, output_path = redo_voice_dub(
+                video_path, wav_path, src_srt, target_srt, lang, target_lang, out_dir, is_audio_only,
+                model=tts_dub_model, ref_seconds=tts_dub_ref_seconds, ref_start=tts_dub_ref_start,
+                ref_text=tts_dub_ref_text, max_lines=max_lines,
+                log_fn=job.log, stage_fn=job.set_stage, should_cancel=job.cancel_event.is_set,
+            )
+            job.result = {
+                "dub_audio": str(dub_audio),
+                "output_path": str(output_path) if output_path else None,
+                "video_path": str(video_path),
+            }
+            job.status = "done"
+            job.emit({"type": "done", **job.result})
+        except JobCancelled:
+            job.status = "cancelled"
+            job.emit({"type": "cancelled"})
+        except BaseException as e:
+            job.status = "error"
+            job.error = str(e)
+            job.emit({"type": "error", "message": str(e)})
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
