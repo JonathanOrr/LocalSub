@@ -9,7 +9,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from pipeline.orchestrate import AUDIO_EXTENSIONS, PipelineConfig
 from pipeline.vad_ten import detect_raw_speech_runs
-from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio
+from pipeline.whisper_engine import WHISPER_LANGUAGES, extract_audio, list_gpus
 from webapp.runner import JOBS, cancel_job, start_job, submit_confirm
 
 app = Flask(__name__)
@@ -24,7 +24,8 @@ BROWSABLE_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 @app.route("/")
 def index():
     languages = sorted(WHISPER_LANGUAGES.items(), key=lambda kv: kv[1])
-    return render_template("index.html", defaults=PipelineConfig(), languages=languages)
+    gpus = list_gpus()
+    return render_template("index.html", defaults=PipelineConfig(), languages=languages, gpus=gpus)
 
 
 @app.route("/api/browse")

@@ -39,6 +39,11 @@ class PipelineConfig:
     no_translate: bool = False
     threads: int = 12
     no_gpu: bool = False
+    # which GPU whisper.cpp decodes on: the ggml-vulkan device index (the one shown in the
+    # web UI's GPU dropdown, i.e. the "Found N Vulkan devices" table whisper-cli logs).
+    # Empty string = let whisper pick its default (all dedicated GPUs). Ignored when
+    # no_gpu is set. Maps to the GGML_VK_VISIBLE_DEVICES env var - see whisper_engine.transcribe.
+    gpu: str = ""
     vad: bool = False
     vad_max_speech_s: float = 15.0
     vad_engine: str = "whisper"
@@ -184,7 +189,7 @@ def run_pipeline(
     src_srt = transcribe(
         wav_path, model_path, config.lang, translate=False,
         out_stem=out_dir / f"{video_path.stem}.{config.lang}",
-        threads=config.threads, use_gpu=not config.no_gpu, vad_model_path=vad_model_path,
+        threads=config.threads, use_gpu=not config.no_gpu, gpu=config.gpu, vad_model_path=vad_model_path,
         vad_max_speech_s=config.vad_max_speech_s, entropy_thold=config.entropy_thold,
         logprob_thold=config.logprob_thold, no_speech_thold=config.no_speech_thold,
         max_context=config.max_context, vad_threshold=config.vad_threshold,
@@ -318,7 +323,7 @@ def run_pipeline(
             target_srt = transcribe(
                 wav_path, model_path, config.lang, translate=True,
                 out_stem=out_dir / f"{video_path.stem}.en",
-                threads=config.threads, use_gpu=not config.no_gpu, vad_model_path=vad_model_path,
+                threads=config.threads, use_gpu=not config.no_gpu, gpu=config.gpu, vad_model_path=vad_model_path,
                 vad_max_speech_s=config.vad_max_speech_s, entropy_thold=config.entropy_thold,
                 logprob_thold=config.logprob_thold, no_speech_thold=config.no_speech_thold,
                 max_context=config.max_context, vad_threshold=config.vad_threshold,

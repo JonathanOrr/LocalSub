@@ -43,6 +43,11 @@ def main() -> None:
                               "transcribe and mux the source-language subtitles only")
     parser.add_argument("--threads", type=int, default=12, help="CPU threads if GPU is unavailable")
     parser.add_argument("--no-gpu", action="store_true", help="force CPU decoding")
+    parser.add_argument("--gpu", default="",
+                         help="which GPU whisper.cpp decodes on: the ggml-vulkan device "
+                              "index (the one whisper.cpp logs as 'Found N Vulkan devices', "
+                              "the same list the web UI's GPU dropdown shows). Default (empty) "
+                              "lets whisper use all dedicated GPUs. Ignored with --no-gpu")
     parser.add_argument("--vad", action="store_true",
                          help="enable Voice Activity Detection (off by default: VAD helps avoid "
                               "repeated/looping hallucinated text during long non-speech stretches, "

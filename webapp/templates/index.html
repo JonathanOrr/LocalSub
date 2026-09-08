@@ -100,6 +100,16 @@
               <label class="form-label">CPU threads (if no GPU)</label>
               <input type="number" class="form-control" name="threads" value="{{ defaults.threads }}">
             </div>
+            <div class="col-md-4">
+              <label class="form-label" for="gpu">GPU (Vulkan device)</label>
+              <select class="form-select" name="gpu" id="gpu">
+                <option value="" {{ 'selected' if not defaults.gpu }}>auto (all dedicated GPUs)</option>
+                {% for index, name in gpus %}
+                <option value="{{ index }}" {{ 'selected' if defaults.gpu == index }}>{{ index }}: {{ name }}</option>
+                {% endfor %}
+              </select>
+              <div class="form-text">Which GPU whisper.cpp decodes on. Greyed out when CPU decoding is forced.</div>
+            </div>
             <div class="col-md-4 d-flex align-items-end">
               <div class="form-check">
                 <input class="form-check-input" type="checkbox" name="no_gpu" id="no_gpu">

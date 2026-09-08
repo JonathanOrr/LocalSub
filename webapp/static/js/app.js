@@ -37,6 +37,8 @@ const confirmTitle = document.getElementById("confirmTitle");
 const videoPathInput = document.getElementById("videoPathInput");
 const audioOnlyNote = document.getElementById("audioOnlyNote");
 const noLlmVisionCheckbox = document.getElementById("no_llm_vision");
+const noGpuCheckbox = document.getElementById("no_gpu");
+const gpuSelect = document.getElementById("gpu");
 const refFrameAddControls = document.getElementById("refFrameAddControls");
 const refFrameAudioNote = document.getElementById("refFrameAudioNote");
 const browseModalEl = document.getElementById("browseModal");
@@ -105,6 +107,7 @@ resetBtn.addEventListener("click", () => {
   clearRefFramePicker();
   renderVadViz();
   updateAudioOnlyNote();
+  updateGpuField();
 });
 
 // Per-section "Reset section" buttons: form.reset() only resets the whole form, so reset
@@ -129,6 +132,7 @@ document.querySelectorAll(".section-reset-btn").forEach((btn) => {
     const target = document.getElementById(btn.dataset.resetTarget);
     resetFieldsIn(target);
     if (btn.dataset.resetTarget === "panelVad") renderVadViz();
+    if (btn.dataset.resetTarget === "panelBasic") updateGpuField();
     if (btn.dataset.resetTarget === "panelLlm") {
       clearRefFramePicker();
       updateAudioOnlyNote(); // re-force "Disable vision" if audio-only input is still active
@@ -188,6 +192,21 @@ function updateAudioOnlyNote() {
   refFrameAudioNote.style.display = isAudio ? "block" : "none";
 }
 
+// Whisper's GPU pick only has any effect when GPU decoding is actually used, so grey the
+// dropdown out while "Force CPU decoding" is checked - mirrors the audio-only forcing of
+// "Disable vision" above, so the form reflects what a run will actually do.
+function updateGpuField() {
+  if (!gpuSelect) return;
+  if (noGpuCheckbox.checked) {
+    gpuSelect.disabled = true;
+    gpuSelect.title = "GPU selection has no effect while CPU decoding is forced.";
+  } else {
+    gpuSelect.disabled = false;
+    gpuSelect.title = "";
+  }
+}
+noGpuCheckbox.addEventListener("change", updateGpuField);
+
 function buildPayload() {
   const data = new FormData(form);
   const payload = { video_path: data.get("video_path"), workdir: data.get("workdir") || null };
@@ -195,6 +214,10 @@ function buildPayload() {
   for (const f of INT_FIELDS) payload[f] = parseInt(data.get(f), 10);
   for (const f of FLOAT_FIELDS) payload[f] = parseFloat(data.get(f));
   for (const f of STR_FIELDS) payload[f] = data.get(f);
+  // read .value (not FormData) so the GPU pick is still submitted even when the select is
+  // disabled by "Force CPU decoding" - a disabled control is omitted from FormData entirely.
+  // (Harmless either way: the pipeline ignores gpu whenever no_gpu is set.)
+  payload.gpu = form.querySelector('[name="gpu"]').value;
   payload.reference_frames = referenceFrames;
   return payload;
 }
@@ -718,6 +741,7 @@ form.addEventListener("submit", (e) => {
 // done/error state on (re)connect, see Job.subscribe() in webapp/runner.py.
 window.addEventListener("DOMContentLoaded", () => {
   updateAudioOnlyNote(); // in case the browser restored a previously-typed value on load
+  updateGpuField(); // in case "Force CPU decoding" was restored checked on load
   loadRecentJobs();
   const savedJobId = localStorage.getItem(JOB_STORAGE_KEY);
   if (!savedJobId) return;

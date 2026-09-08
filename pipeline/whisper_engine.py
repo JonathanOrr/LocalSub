@@ -1,3 +1,5 @@
+import os
+import re
 import select
 import subprocess
 import sys
@@ -175,8 +177,38 @@ def check_dependencies(model: str, use_vad: bool, vad_engine: str) -> tuple[Path
     return model_path, vad_model_path
 
 
+def list_gpus() -> list[tuple[str, str]]:
+    """Enumerate the Vulkan devices whisper.cpp can decode on, as (index, name) tuples, to
+    populate the web UI's "GPU" dropdown. This project builds whisper.cpp with the Vulkan
+    backend (see setup.sh), and Vulkan device selection is done by restricting which
+    physical devices are visible (the GGML_VK_VISIBLE_DEVICES env var, ggml-vulkan's analog
+    of CUDA_VISIBLE_DEVICES) - so an index a user picks must match ggml-vulkan's OWN device
+    numbering, not some other tool's. vulkaninfo walks the same physical-device list but
+    its count can diverge from what whisper.cpp uses (it also surfaces virtual/headless
+    devices whisper.cpp filters out), so instead we read the device table ggml-vulkan logs
+    at startup: whisper-cli prints every device even when invoked with just -h, and that's
+    the exact binary the pipeline runs. Returns [] when the binary is missing, the run
+    fails/times out, or the build has no Vulkan backend - the dropdown then just offers
+    "auto" (whisper.cpp's own default of all dedicated GPUs)."""
+    if not WHISPER_CLI.exists():
+        return []
+    try:
+        proc = subprocess.run([str(WHISPER_CLI), "-h"], capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    # device lines look like:
+    #   ggml_vulkan: 1 = AMD Radeon RX 9070 XT (RADV GFX1201) (radv) | uma: 0 | fp16: 1 | ...
+    # (the name runs up to the first '|' column separator; the leading index is what
+    # GGML_VK_VISIBLE_DEVICES selects on)
+    return [
+        (m.group(1), m.group(2).strip())
+        for m in re.finditer(r"^ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*\|", proc.stderr, re.MULTILINE)
+    ]
+
+
 def _run_streamed(
     cmd: list[str], log_fn: Callable[[str], None], should_cancel: Callable[[], bool] = lambda: False,
+    env: dict | None = None,
 ) -> None:
     """Run cmd, forwarding its stdout/stderr line-by-line to log_fn as it runs (instead of
     subprocess.run's default of just inheriting the parent's stdio) - needed so a caller
@@ -188,8 +220,9 @@ def _run_streamed(
     checking only between lines would leave a cancel request sitting unnoticed for that whole
     stretch. On a hit, the process is killed outright and JobCancelled is raised, giving the
     web UI's Cancel button a genuinely prompt effect regardless of the subprocess's own
-    output cadence."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    output cadence. env, when given, is passed to Popen as the subprocess's environment
+    (e.g. to pin a specific GPU via GGML_VK_VISIBLE_DEVICES); None inherits the parent's."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
     assert proc.stdout is not None  # guaranteed by stdout=subprocess.PIPE above
     stdout = proc.stdout
     while True:
@@ -230,7 +263,7 @@ def extract_audio(
 
 def transcribe(
     wav_path: Path, model_path: Path, lang: str, translate: bool,
-    out_stem: Path, threads: int, use_gpu: bool, vad_model_path: Path | None,
+    out_stem: Path, threads: int, use_gpu: bool, gpu: str, vad_model_path: Path | None,
     vad_max_speech_s: float, entropy_thold: float, logprob_thold: float, no_speech_thold: float,
     max_context: int, vad_threshold: float, vad_min_speech_ms: int, vad_min_silence_ms: int,
     vad_speech_pad_ms: int, log_fn: Callable[[str], None] = print,
@@ -252,7 +285,15 @@ def transcribe(
             "-vt", str(vad_threshold), "-vspd", str(vad_min_speech_ms),
             "-vsd", str(vad_min_silence_ms), "-vp", str(vad_speech_pad_ms),
         ]
-    _run_streamed(cmd, log_fn, should_cancel)
+    # Pin a specific GPU by restricting which Vulkan devices whisper.cpp sees - ggml-vulkan
+    # honors GGML_VK_VISIBLE_DEVICES (its CUDA_VISIBLE_DEVICES analog) and, with a single
+    # index set, exposes just that device, which whisper's default --device 0 then selects.
+    # Empty gpu (or CPU decode) leaves the env untouched so whisper picks all dedicated GPUs.
+    env = None
+    if use_gpu and gpu:
+        env = dict(os.environ, GGML_VK_VISIBLE_DEVICES=gpu)
+        log_fn(f"  Pinning whisper to Vulkan device(s): {gpu}")
+    _run_streamed(cmd, log_fn, should_cancel, env=env)
     return Path(f"{out_stem}.srt")
 
 
